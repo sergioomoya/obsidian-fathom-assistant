@@ -1,0 +1,10 @@
+{
+  "id": "fathom-assistant",
+  "name": "Fathom Assistant",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Agente inteligente con contexto local para interactuar con Fathom Notebook.",
+  "author": "Sergio Moya",
+  "authorUrl": "https://github.com/sergioomoya",
+  "isDesktopOnly": true
+}

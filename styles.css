@@ -1,0 +1,434 @@
+/* Fathom Assistant - Premium Chat UI (Antigravity Style) */
+
+.fathom-chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: var(--font-interface);
+  background-color: var(--background-primary);
+}
+
+/* ─── HEADER ─── */
+.fathom-chat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 24px;
+  background-color: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.fathom-chat-header input.chat-title {
+  flex-grow: 1;
+  background: transparent;
+  border: none;
+  font-size: var(--font-ui-large);
+  font-weight: 600;
+  color: var(--text-normal);
+  padding: 4px 8px;
+  border-radius: 6px;
+  box-shadow: none !important;
+  transition: background 0.2s;
+}
+
+.fathom-chat-header input.chat-title:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.fathom-chat-header input.chat-title:focus {
+  background-color: var(--background-modifier-hover);
+  outline: none;
+}
+
+.fathom-chat-header select.chat-selector {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 6px 24px 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="gray" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>');
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  transition: all 0.2s;
+  
+  /* Evitar que se desborde sobre los botones */
+  max-width: 140px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.fathom-chat-header select.chat-selector:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.fathom-chat-header button.new-chat-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 18px;
+  color: var(--text-muted);
+  border-radius: 6px;
+  box-shadow: none;
+  transition: all 0.2s;
+}
+
+.fathom-chat-header button.new-chat-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+/* ─── CHAT BOX ─── */
+.fathom-chat-box {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding: 16px;
+  background-color: var(--background-primary);
+  user-select: text;
+  -webkit-user-select: text;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ─── BURBUJAS ─── */
+.chat-message {
+  line-height: 1.6;
+  font-size: var(--font-ui-medium);
+  color: var(--text-normal);
+  max-width: 90%;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  background-color: var(--background-secondary-alt);
+  padding: 12px 20px;
+  border-radius: 18px;
+  border-bottom-right-radius: 4px;
+  color: var(--text-normal);
+}
+
+.chat-message-user p {
+  margin: 0;
+}
+
+.chat-message-bot {
+  align-self: flex-start;
+  background-color: transparent;
+  padding: 0px 10px;
+  max-width: 100%;
+}
+
+/* Tipografía dentro de las respuestas de Fathom */
+.chat-message-bot p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.chat-message-bot pre {
+  background-color: var(--background-primary-alt);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* ─── ZONA DE INPUT UNIFICADA ─── */
+.fathom-chat-input-wrapper {
+  padding: 16px 24px 24px 24px;
+  background-color: var(--background-primary);
+}
+
+.fathom-chat-input-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background-color: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 24px;
+  padding: 8px 16px;
+  transition: border-color 0.2s;
+}
+
+.fathom-chat-input-container:focus-within {
+  border-color: var(--interactive-accent);
+}
+
+.fathom-attach-btn {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 8px;
+  font-size: 18px;
+  color: var(--text-muted);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  transition: all 0.2s;
+}
+
+.fathom-attach-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.fathom-file-input {
+  display: none;
+}
+
+/* ─── POPOVER MENU (Add Context) ─── */
+.fathom-popover {
+  position: absolute;
+  bottom: 80px;
+  left: 12px;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  z-index: 100;
+  display: none;
+  min-width: 180px;
+  overflow: hidden;
+}
+
+.fathom-popover.visible {
+  display: block;
+  animation: popUp 0.15s ease-out;
+}
+
+@keyframes popUp {
+  from { opacity: 0; transform: translateY(10px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.fathom-popover ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.fathom-popover li {
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  transition: background 0.1s;
+}
+
+.fathom-popover li:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.fathom-popover li.disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/* ─── TEXTAREA ─── */
+.fathom-chat-input-container textarea {
+  flex-grow: 1;
+  background: transparent;
+  border: none;
+  box-shadow: none !important;
+  resize: none;
+  height: 48px;
+  max-height: 200px;
+  padding: 12px 0px;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-medium);
+  color: var(--text-normal);
+}
+
+.fathom-chat-input-container textarea:focus {
+  outline: none;
+  box-shadow: none;
+  border: none;
+}
+
+.fathom-chat-input-container textarea::placeholder {
+  color: var(--text-faint);
+}
+
+/* ─── BOTON DE ENVIAR (Y STOP) ─── */
+.fathom-send-btn {
+  background-color: var(--interactive-accent);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-on-accent);
+  margin-bottom: 8px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.fathom-send-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.fathom-send-btn:hover {
+  transform: scale(1.05);
+  filter: brightness(1.1);
+}
+
+.chat-message.chat-message-bot {
+  background-color: transparent;
+  position: relative;
+}
+
+.fathom-copy-btn {
+  position: absolute;
+  bottom: -16px;
+  right: 0px;
+  background: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-message.chat-message-bot:hover .fathom-copy-btn {
+  opacity: 1;
+}
+
+.fathom-copy-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.fathom-send-btn.stop-mode {
+  background-color: transparent;
+  color: var(--text-error);
+  border-radius: 4px; 
+}
+.fathom-send-btn.stop-mode:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--color-red);
+}
+
+/* ─── CHAT FOOTER ─── */
+.fathom-chat-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 12px 12px 12px;
+  background-color: transparent;
+  position: relative; /* Para el popover */
+}
+
+/* Modificamos el botón attach para que encaje en el footer */
+.new-chat-btn,
+.folder-chat-btn {
+  background: transparent !important;
+  border: none;
+  box-shadow: none !important;
+  font-size: var(--font-ui-medium);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.new-chat-btn:hover,
+.folder-chat-btn:hover {
+  color: var(--text-normal);
+}
+
+.fathom-chat-footer .fathom-attach-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color 0.15s, background-color 0.15s;
+}
+.fathom-chat-footer .fathom-attach-btn:hover {
+  color: var(--text-normal);
+  background-color: var(--background-modifier-hover);
+}
+
+.fathom-model-selector {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  box-shadow: none;
+}
+.fathom-model-selector:hover {
+  color: var(--text-normal);
+  background-color: var(--background-modifier-hover);
+}
+.fathom-model-selector:focus {
+  box-shadow: none;
+}
+
+/* Corregir el fondo blanco de las opciones nativas de los selects */
+.fathom-model-selector option,
+.chat-selector option {
+  background-color: var(--background-primary);
+  color: var(--text-normal);
+}
+
+/* Ajustes del Popover en el Footer */
+.fathom-popover {
+  bottom: 30px;
+}
+
+/* ─── CHIPS (CONTEXTO Y ADJUNTOS) ─── */
+.context-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 12px 12px 12px;
+}
+
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.context-chip-close {
+  cursor: pointer;
+  font-weight: bold;
+  opacity: 0.6;
+}
+
+.context-chip-close:hover {
+  opacity: 1;
+  color: var(--text-error);
+}
