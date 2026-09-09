@@ -218,27 +218,33 @@ export class MCPManager {
       for (const tool of session.tools) {
         const functionName = `mcp__${serverName}__${tool.name}`.replace(/[^a-zA-Z0-9_]/g, '_');
         
-        // Mapear inputSchema a formato Gemini
-        const properties: Record<string, any> = {};
-        const required: string[] = tool.inputSchema?.required || [];
+        const rawProperties = tool.inputSchema?.properties;
+        const hasProperties = rawProperties && typeof rawProperties === 'object' && Object.keys(rawProperties).length > 0;
 
-        if (tool.inputSchema?.properties) {
-          for (const [propName, propDef] of Object.entries<any>(tool.inputSchema.properties)) {
-            properties[propName] = {
-              type: this.mapSchemaType(propDef.type),
-              description: propDef.description || ''
-            };
+        let parameters: any = undefined;
+
+        if (hasProperties) {
+          const properties: Record<string, any> = {};
+          for (const [propName, propDef] of Object.entries<any>(rawProperties)) {
+            properties[propName] = this.sanitizeProperty(propDef);
           }
+
+          const rawRequired = tool.inputSchema?.required;
+          const required = Array.isArray(rawRequired)
+            ? rawRequired.filter((r: any) => typeof r === 'string' && properties[r])
+            : undefined;
+
+          parameters = {
+            type: Type.OBJECT,
+            properties,
+            ...(required && required.length > 0 ? { required } : {})
+          };
         }
 
         declarations.push({
           name: functionName,
           description: `[MCP: ${serverName}] ${tool.description || tool.name}`,
-          parameters: {
-            type: Type.OBJECT,
-            properties,
-            required
-          }
+          ...(parameters ? { parameters } : {})
         });
       }
     }
@@ -246,11 +252,57 @@ export class MCPManager {
     return declarations;
   }
 
-  private mapSchemaType(typeStr?: string): Type {
-    switch (typeStr) {
+  private sanitizeProperty(schema: any): any {
+    if (!schema || typeof schema !== 'object') {
+      return { type: Type.STRING };
+    }
+
+    const mappedType = this.mapSchemaType(schema.type);
+    const result: any = {
+      type: mappedType
+    };
+
+    if (typeof schema.description === 'string' && schema.description.trim()) {
+      result.description = schema.description.trim();
+    }
+
+    if (mappedType === Type.ARRAY) {
+      if (schema.items) {
+        result.items = this.sanitizeProperty(schema.items);
+      } else {
+        result.items = { type: Type.STRING };
+      }
+    } else if (mappedType === Type.OBJECT) {
+      if (schema.properties && typeof schema.properties === 'object' && Object.keys(schema.properties).length > 0) {
+        result.properties = {};
+        for (const [key, val] of Object.entries(schema.properties)) {
+          result.properties[key] = this.sanitizeProperty(val);
+        }
+        if (Array.isArray(schema.required) && schema.required.length > 0) {
+          result.required = schema.required.filter((r: any) => typeof r === 'string' && result.properties[r]);
+        }
+      }
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+      result.enum = schema.enum.map((e: any) => String(e));
+    }
+
+    return result;
+  }
+
+  private mapSchemaType(typeVal?: any): Type {
+    if (Array.isArray(typeVal)) {
+      const primary = typeVal.find((t: string) => t !== 'null') || 'string';
+      return this.mapSchemaType(primary);
+    }
+    if (typeof typeVal !== 'string') {
+      return Type.STRING;
+    }
+    switch (typeVal.toLowerCase()) {
       case 'string': return Type.STRING;
-      case 'number':
-      case 'integer': return Type.NUMBER;
+      case 'number': return Type.NUMBER;
+      case 'integer': return Type.INTEGER;
       case 'boolean': return Type.BOOLEAN;
       case 'array': return Type.ARRAY;
       case 'object': return Type.OBJECT;
