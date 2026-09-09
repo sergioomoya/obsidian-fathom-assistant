@@ -1,5 +1,6 @@
-# User data & secrets (CRÍTICO: nunca subir data.json con API Keys)
+# User data & secrets (CRÍTICO: nunca subir data.json ni mcp-config.json con credenciales)
 data.json
+mcp-config.json
 
 # Dependencies
 node_modules/

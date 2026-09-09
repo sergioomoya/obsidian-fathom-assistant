@@ -1,6 +1,7 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, TAbstractFile, TFile, TFolder, MarkdownRenderer, Component } from 'obsidian';
 import { GeminiService, AgentActivityStep, AgentUIFeedback } from './agent/gemini-service';
-import { ToolExecutor } from './agent/executor';
+import { ToolExecutor, PermissionDecision } from './agent/executor';
+import { MCPManager } from './agent/mcp-manager';
 
 // ─── INTERFACES Y CONSTANTES ────────────────────────────────────────────────────────
 interface FathomAssistantSettings {
@@ -8,14 +9,18 @@ interface FathomAssistantSettings {
   fathomRepoPath: string;
   geminiModel: string;
   chatsFolder: string;
+  alwaysAllowedPermissions: string[];
+  autoInjectClientContext: boolean;
 }
 
 const DEFAULT_SETTINGS: FathomAssistantSettings = {
   geminiApiKey: '',
   fathomRepoPath: '',
   geminiModel: 'gemini-3.7-flash',
-  chatsFolder: 'Fathom Chats'
-}
+  chatsFolder: 'Fathom Chats',
+  alwaysAllowedPermissions: [],
+  autoInjectClientContext: true
+};
 
 export const VIEW_TYPE_FATHOM_CHAT = "fathom-chat-view";
 
@@ -74,7 +79,6 @@ class BotActivityTracker {
     this.filesGroupEl.empty();
 
     const count = this.filesSteps.length;
-    const isRunning = this.filesSteps.some(s => s.status === 'running');
     const headerTitle = `Explored ${count} file${count === 1 ? '' : 's'}`;
 
     const header = this.filesGroupEl.createDiv({ cls: 'fathom-activity-header' });
@@ -145,7 +149,6 @@ class BotActivityTracker {
       this.workingIndicatorEl.remove();
       this.workingIndicatorEl = null;
     }
-    // Si no hubo ninguna actividad, eliminar el contenedor para no dejar espacio vacío
     if (this.filesSteps.length === 0 && this.commandSteps.length === 0) {
       this.containerEl.remove();
     }
@@ -159,7 +162,7 @@ export class FathomChatView extends ItemView {
   
   private chatHistory: {role: 'user' | 'model', text: string}[] = [];
   private currentChatFile: TFile | null = null;
-  private plugin: FathomAssistantPlugin;
+  public plugin: FathomAssistantPlugin;
 
   // DOM Elements
   private chatBoxEl: HTMLElement;
@@ -248,12 +251,12 @@ export class FathomChatView extends ItemView {
     
     // --- BOTON DE ENVIAR (Y STOP) ---
     this.sendBtnEl = inputContainer.createEl('button', { cls: 'fathom-send-btn' });
-    this.sendBtnEl.style.display = 'none'; // Vacío por defecto
+    this.sendBtnEl.style.display = 'none';
     
     // --- CHAT FOOTER ---
     const chatFooter = mainDiv.createDiv({ cls: 'fathom-chat-footer' });
     
-    // --- POPOVER MENU (anclado al footer) ---
+    // --- POPOVER MENU ---
     this.popoverEl = chatFooter.createDiv({ cls: 'fathom-popover' });
     const popoverList = this.popoverEl.createEl('ul');
     const optionAttach = popoverList.createEl('li', { text: '📎 Adjuntar Archivo' });
@@ -268,7 +271,6 @@ export class FathomChatView extends ItemView {
       this.popoverEl.classList.toggle('visible');
     };
 
-    // Cerrar popover clickeando fuera
     document.addEventListener('click', (e) => {
       if (this.popoverEl && !this.popoverEl.contains(e.target as Node) && !attachBtn.contains(e.target as Node)) {
         this.popoverEl.classList.remove('visible');
@@ -323,7 +325,7 @@ export class FathomChatView extends ItemView {
     
     this.inputEl.addEventListener('input', () => this.updateSendBtnState());
 
-    // --- LOGICA DE ENVIO CON FEEDBACK EN VIVO ESTILO ANTIGRAVITY ---
+    // --- LOGICA DE ENVIO CON GOBERNANZA INTERACTIVA Y STREAMING ---
     const submitPrompt = async () => {
       if (this.isGenerating) return;
 
@@ -345,9 +347,10 @@ export class FathomChatView extends ItemView {
         this.appendUserMessage(`[Ha enviado ${this.activeAttachments.length} archivo/s adjunto/s]`);
       }
       
-      // Crear contenedor del mensaje del bot
+      // Contenedores del mensaje del bot
       const botMsgDiv = this.chatBoxEl.createDiv({ cls: 'chat-message chat-message-bot' });
       const activityTracker = new BotActivityTracker(botMsgDiv);
+      const interactiveCardsEl = botMsgDiv.createDiv({ cls: 'fathom-interactive-cards' });
       const contentDiv = botMsgDiv.createDiv({ cls: 'chat-message-content' });
       this.scrollToBottom();
 
@@ -366,21 +369,22 @@ export class FathomChatView extends ItemView {
 
         let finalPrompt = text || 'Analiza el/los archivos adjuntos.';
         
+        // 1. Contexto manual adjunto (Foco prioritario)
         if (this.activeContextItems.length > 0) {
-          let contextStr = "CONTEXTO DE OBSIDIAN ADJUNTO:\n\n";
+          let contextStr = "=== CONTEXTO MANUAL ADJUNTO POR EL USUARIO (FOCO PRIORITARIO) ===\n\n";
           for (const item of this.activeContextItems) {
             if (item instanceof TFile && item.extension === 'md') {
               const content = await this.app.vault.read(item);
-              contextStr += `--- ARCHIVO: ${item.path} ---\n${content}\n--- FIN ARCHIVO ---\n\n`;
+              contextStr += `--- NOTA ADJUNTA: ${item.path} ---\n${content}\n--- FIN NOTA ---\n\n`;
             } else if (item instanceof TFolder) {
               const filesInFolder = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(item.path + '/'));
               for (const f of filesInFolder) {
                 const content = await this.app.vault.read(f);
-                contextStr += `--- ARCHIVO EN CARPETA (${item.path}): ${f.path} ---\n${content}\n--- FIN ARCHIVO ---\n\n`;
+                contextStr += `--- NOTA EN CARPETA ADJUNTA (${item.path}): ${f.path} ---\n${content}\n--- FIN NOTA ---\n\n`;
               }
             }
           }
-          finalPrompt = `${contextStr}Pregunta/Petición basada en el contexto:\n\n${finalPrompt}`;
+          finalPrompt = `${contextStr}=== FIN CONTEXTO ADJUNTO ===\n\nPetición del usuario:\n${finalPrompt}`;
         }
 
         const promptParts: any[] = [];
@@ -395,11 +399,99 @@ export class FathomChatView extends ItemView {
         const displayedUserText = text || `[Adjuntos enviados]`;
         this.chatHistory.push({ role: 'user', text: displayedUserText });
 
-        const service = new GeminiService(apiKey);
-        const executor = new ToolExecutor(this.app, repoPath);
+        // 2. Contexto base de la bóveda (Directorio de contactos y clientes)
+        const vaultBaseContext = await this.getVaultBaseContext();
+
+        // 3. Configurar Handlers interactivos de permisos y planes
+        const executor = new ToolExecutor(this.app, repoPath, {
+          alwaysAllowedPermissions: this.plugin.settings.alwaysAllowedPermissions || [],
+          onAlwaysAllow: async (key: string) => {
+            if (!this.plugin.settings.alwaysAllowedPermissions) {
+              this.plugin.settings.alwaysAllowedPermissions = [];
+            }
+            if (!this.plugin.settings.alwaysAllowedPermissions.includes(key)) {
+              this.plugin.settings.alwaysAllowedPermissions.push(key);
+              await this.plugin.saveSettings();
+            }
+          },
+          onRequestPermission: (permTitle, permDetails, dangerLevel, permKey) => {
+            return new Promise<PermissionDecision>((resolve) => {
+              const card = interactiveCardsEl.createDiv({ cls: 'fathom-permission-card' });
+              
+              const pHeader = card.createDiv({ cls: 'fathom-permission-header' });
+              pHeader.innerHTML = `⚠️ <span>Permiso Requerido: ${permTitle}</span>`;
+
+              const pDetails = card.createDiv({ cls: 'fathom-permission-details', text: permDetails });
+
+              const actions = card.createDiv({ cls: 'fathom-permission-actions' });
+              
+              const btnApprove = actions.createEl('button', { cls: 'btn-perm-approve', text: 'Aprobar una vez' });
+              const btnAlways = actions.createEl('button', { cls: 'btn-perm-always', text: '🔒 Aprobar siempre' });
+              const btnReject = actions.createEl('button', { cls: 'btn-perm-reject', text: 'Rechazar' });
+
+              const finalize = (choice: string) => {
+                btnApprove.disabled = true;
+                btnAlways.disabled = true;
+                btnReject.disabled = true;
+                actions.empty();
+                actions.createSpan({ cls: 'fathom-item-status done', text: `Elección: ${choice}` });
+                this.scrollToBottom();
+              };
+
+              btnApprove.onclick = () => {
+                finalize('Aprobado una vez');
+                resolve('approved');
+              };
+
+              btnAlways.onclick = () => {
+                finalize('Aprobado siempre (guardado en memoria)');
+                resolve('always');
+              };
+
+              btnReject.onclick = () => {
+                finalize('Rechazado');
+                resolve('rejected');
+              };
+
+              this.scrollToBottom();
+            });
+          },
+          onProposePlan: (planTitle, planSummary, planSteps) => {
+            return new Promise<'approved' | 'rejected'>((resolve) => {
+              const card = interactiveCardsEl.createDiv({ cls: 'fathom-plan-card' });
+              
+              const pTitle = card.createDiv({ cls: 'fathom-plan-title' });
+              pTitle.innerHTML = `📋 <span>Plan de Acción: ${planTitle}</span>`;
+
+              if (planSummary) {
+                card.createDiv({ cls: 'fathom-plan-summary', text: planSummary });
+              }
+
+              const stepsList = card.createDiv({ cls: 'fathom-plan-steps' });
+              planSteps.forEach((step, idx) => {
+                const stepEl = stepsList.createDiv({ cls: 'fathom-plan-step' });
+                stepEl.createSpan({ cls: 'fathom-plan-step-num', text: `${idx + 1}.` });
+                stepEl.createSpan({ text: step });
+              });
+
+              const actions = card.createDiv({ cls: 'fathom-plan-actions' });
+              const btnProceed = actions.createEl('button', { cls: 'btn-plan-proceed', text: '🚀 Proceder con el Plan' });
+
+              btnProceed.onclick = () => {
+                btnProceed.disabled = true;
+                btnProceed.textContent = '✓ Plan Aprobado';
+                resolve('approved');
+              };
+
+              this.scrollToBottom();
+            });
+          }
+        });
+
+        const service = new GeminiService(apiKey, this.plugin.mcpManager);
         
         const abortPromise = new Promise<any>((_, reject) => {
-            this.currentAbortResolver = reject;
+          this.currentAbortResolver = reject;
         });
 
         const feedback: AgentUIFeedback = {
@@ -419,20 +511,20 @@ export class FathomChatView extends ItemView {
           }
         };
 
-        // --- LLAMADA AGÉNTICA CON STREAMING Y ACTIVIDAD ---
+        // --- LLAMADA AGÉNTICA CON GOBERNANZA Y STREAMING ---
         const response = await Promise.race([
-            service.sendMessage(
-              promptParts, 
-              executor, 
-              model, 
-              this.chatHistory.slice(0, -1), 
-              feedback, 
-              this.currentAbortController.signal
-            ),
-            abortPromise
+          service.sendMessage(
+            promptParts, 
+            executor, 
+            model, 
+            this.chatHistory.slice(0, -1), 
+            feedback, 
+            this.currentAbortController.signal,
+            vaultBaseContext
+          ),
+          abortPromise
         ]);
         
-        // Finalizar tracker
         activityTracker.finish();
 
         if (this.abortGeneration) {
@@ -442,11 +534,8 @@ export class FathomChatView extends ItemView {
            return;
         }
         
-        // Renderizar Markdown final limpio
         contentDiv.empty();
         MarkdownRenderer.render(this.app, response, contentDiv, '', new Component());
-        
-        // Inyectar botón de copiar Markdown
         this.injectCopyButton(botMsgDiv, response);
 
         this.chatHistory.push({ role: 'model', text: response });
@@ -465,7 +554,7 @@ export class FathomChatView extends ItemView {
            this.chatHistory.pop();
         } else {
            contentDiv.empty();
-           MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para más detalles.`, contentDiv, '', new Component());
+           MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`, contentDiv, '', new Component());
            this.chatHistory.pop();
         }
       } finally {
@@ -500,11 +589,36 @@ export class FathomChatView extends ItemView {
       }
     };
 
-    // Iniciar
     await this.refreshChatList();
     if (!this.currentChatFile) {
       this.startNewChat();
     }
+  }
+
+  // --- CARGA DE CONTEXTO BASE DE CLIENTES Y CONTACTOS ---
+  private async getVaultBaseContext(): Promise<string> {
+    if (!this.plugin.settings.autoInjectClientContext) {
+      return '';
+    }
+
+    let baseStr = '';
+    
+    // 1. Directorio maestro de contactos
+    const contactsFile = this.app.vault.getAbstractFileByPath('contacts.md');
+    if (contactsFile instanceof TFile) {
+      try {
+        const content = await this.app.vault.read(contactsFile);
+        baseStr += `--- DIRECTORIO GENERAL DE CONTACTOS (contacts.md) ---\n${content}\n\n`;
+      } catch (e) {}
+    }
+
+    // 2. Lista de carpetas de clientes en la raíz
+    const rootFolders = this.app.vault.getRoot().children.filter(f => f instanceof TFolder && !f.name.startsWith('.') && f.name !== 'Fathom Chats');
+    if (rootFolders.length > 0) {
+      baseStr += `--- CARPETAS DE CLIENTES EN LA BÓVEDA ---\n${rootFolders.map(f => `- ${f.name}`).join('\n')}\n\n`;
+    }
+
+    return baseStr;
   }
 
   // --- UI STATE UPDATER ---
@@ -534,7 +648,7 @@ export class FathomChatView extends ItemView {
   }
 
   // ----------------------------------------------------
-  // GESTIÓN DE ARCHIVOS DE HISTORIAL
+  // GESTIÓN DE HISTORIAL
   // ----------------------------------------------------
   private async getChatsFolder(): Promise<TFolder> {
     const folderPath = this.plugin.settings.chatsFolder;
@@ -645,9 +759,6 @@ export class FathomChatView extends ItemView {
     }
   }
 
-  // ----------------------------------------------------
-  // GESTIÓN DE CONTEXTO Y ADJUNTOS
-  // ----------------------------------------------------
   public addContextItem(file: TAbstractFile) {
     if (!this.activeContextItems.some(item => item.path === file.path)) {
       this.activeContextItems.push(file);
@@ -740,18 +851,26 @@ export class FathomChatView extends ItemView {
 // ─── CLASE PRINCIPAL DEL PLUGIN ─────────────────────────────────────────────────────
 export default class FathomAssistantPlugin extends Plugin {
   settings: FathomAssistantSettings;
+  mcpManager: MCPManager;
 
   async onload() {
     console.log('Cargando Fathom Assistant Plugin...');
     await this.loadSettings();
 
-    // Asegurar que la carpeta de chats queda excluida de la bóveda para no molestar
+    // 1. Inicializar cliente MCP independiente
+    const pluginDir = (this.app.vault.adapter as any).basePath 
+      ? `${(this.app.vault.adapter as any).basePath}/.obsidian/plugins/fathom-assistant`
+      : '.';
+    
+    this.mcpManager = new MCPManager(pluginDir);
+    this.mcpManager.initialize().catch(err => console.warn("FATHOM_DEBUG - MCP Manager init:", err));
+
+    // 2. Auto-excluir la carpeta de chats de la bóveda
     try {
       let currentFilters = (this.app.vault as any).getConfig("userIgnoreFilters") || [];
       if (!currentFilters.includes(this.settings.chatsFolder)) {
         currentFilters.push(this.settings.chatsFolder);
         (this.app.vault as any).setConfig("userIgnoreFilters", currentFilters);
-        console.log(`FATHOM_DEBUG - Carpeta '${this.settings.chatsFolder}' auto-excluida del sistema.`);
       }
     } catch (e) {
       console.warn("FATHOM_DEBUG - No se pudo excluir la carpeta automáticamente", e);
@@ -794,6 +913,12 @@ export default class FathomAssistantPlugin extends Plugin {
         }
       })
     );
+  }
+
+  async onunload() {
+    if (this.mcpManager) {
+      this.mcpManager.closeAll();
+    }
   }
 
   async loadSettings() {
@@ -878,5 +1003,62 @@ class FathomAssistantSettingTab extends PluginSettingTab {
           this.plugin.settings.chatsFolder = value.trim();
           await this.plugin.saveSettings();
         }));
+
+    new Setting(containerEl)
+      .setName('Contexto de Clientes y Contactos por defecto')
+      .setDesc('Inyectar automáticamente el directorio contacts.md y la lista de clientes en las instrucciones base.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.autoInjectClientContext ?? true)
+        .onChange(async (value) => {
+          this.plugin.settings.autoInjectClientContext = value;
+          await this.plugin.saveSettings();
+        }));
+
+    // ─── SECCIÓN: GOBERNANZA Y PERMISOS AUTORIZADOS ───
+    containerEl.createEl('h3', { text: '🔒 Gobernanza y Memoria de Permisos' });
+    const allowed = this.plugin.settings.alwaysAllowedPermissions || [];
+    
+    if (allowed.length === 0) {
+      containerEl.createEl('p', { 
+        text: 'No tienes permisos concedidos permanentemente. El asistente solicitará tu aprobación interactiva en el chat cuando intente acciones de impacto.',
+        cls: 'setting-item-description'
+      });
+    } else {
+      containerEl.createEl('p', {
+        text: `Tienes ${allowed.length} acción(es) autorizadas permanentemente:`,
+        cls: 'setting-item-description'
+      });
+
+      for (const permKey of allowed) {
+        new Setting(containerEl)
+          .setName(permKey.replace(/^perm_/, '').replace(/_/g, ' '))
+          .addButton(btn => btn
+            .setButtonText('Revocar Permiso')
+            .setWarning()
+            .onClick(async () => {
+              this.plugin.settings.alwaysAllowedPermissions = this.plugin.settings.alwaysAllowedPermissions.filter(k => k !== permKey);
+              await this.plugin.saveSettings();
+              this.display();
+            }));
+      }
+
+      new Setting(containerEl)
+        .setName('Restablecer todos los permisos')
+        .setDesc('Elimina todas las autorizaciones permanentes guardadas.')
+        .addButton(btn => btn
+          .setButtonText('Olvidar Todos')
+          .onClick(async () => {
+            this.plugin.settings.alwaysAllowedPermissions = [];
+            await this.plugin.saveSettings();
+            this.display();
+          }));
+    }
+
+    // ─── SECCIÓN: SERVIDORES MCP ───
+    containerEl.createEl('h3', { text: '🔌 Servidores MCP (Model Context Protocol)' });
+    containerEl.createEl('p', {
+      text: 'Los servidores MCP se gestionan de forma independiente en el archivo mcp-config.json del plugin (soporta notebooklm, sqlserver, etc.).',
+      cls: 'setting-item-description'
+    });
   }
 }

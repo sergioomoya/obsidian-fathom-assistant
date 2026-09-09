@@ -545,3 +545,164 @@
   50% { opacity: 1; }
 }
 
+/* ─── TARJETAS INTERACTIVAS: PERMISOS Y PLANES ─── */
+.fathom-permission-card {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 4px solid var(--text-warning);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fathom-permission-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fathom-permission-details {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-muted);
+  background-color: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.fathom-permission-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.btn-perm-approve {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.btn-perm-approve:hover {
+  opacity: 0.9;
+}
+
+.btn-perm-always {
+  background-color: transparent;
+  color: var(--interactive-accent);
+  border: 1px solid var(--interactive-accent);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 0.15s;
+}
+
+.btn-perm-always:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.btn-perm-reject {
+  background-color: transparent;
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.btn-perm-reject:hover {
+  background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.1));
+}
+
+.fathom-plan-card {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--interactive-accent);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fathom-plan-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fathom-plan-summary {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fathom-plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.fathom-plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-normal);
+}
+
+.fathom-plan-step-num {
+  font-family: var(--font-monospace);
+  font-weight: 600;
+  color: var(--interactive-accent);
+  min-width: 18px;
+}
+
+.btn-plan-proceed {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  align-self: flex-start;
+  transition: opacity 0.15s;
+}
+
+.btn-plan-proceed:hover {
+  opacity: 0.9;
+}
+
+

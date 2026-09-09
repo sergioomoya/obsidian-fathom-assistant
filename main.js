@@ -22300,6 +22300,47 @@ var agentTools = [
     }
   },
   {
+    name: "read_local_file",
+    description: "Lee el contenido de cualquier archivo o documento en el equipo mediante su ruta absoluta o relativa.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        file_path: { type: Type.STRING, description: "Ruta completa del archivo en el sistema de archivos (ej: C:\\...\\archivo.txt o ./config.json)" }
+      },
+      required: ["file_path"]
+    }
+  },
+  {
+    name: "request_user_permission",
+    description: "Solicita permiso expl\xEDcito al usuario en el chat antes de ejecutar una acci\xF3n sensible, destructiva o de alto impacto (ej: modificar bases de datos SQL, sobreescribir archivos cr\xEDticos o alterar configuraciones).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action_title: { type: Type.STRING, description: "T\xEDtulo claro de la acci\xF3n para la que se pide permiso (ej: Ejecutar UPDATE en base de datos BASOR)" },
+        action_details: { type: Type.STRING, description: "Detalle exacto del comando, query o cambio que se va a realizar" },
+        danger_level: { type: Type.STRING, description: "Nivel de riesgo: low, medium, high" }
+      },
+      required: ["action_title", "action_details"]
+    }
+  },
+  {
+    name: "propose_implementation_plan",
+    description: "Presenta un plan de implementaci\xF3n o checklist interactivo al usuario en el chat para tareas complejas antes de ejecutarlas.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        title: { type: Type.STRING, description: "T\xEDtulo del plan de implementaci\xF3n" },
+        summary: { type: Type.STRING, description: "Resumen del objetivo del plan" },
+        steps: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: "Lista ordenada de pasos a ejecutar"
+        }
+      },
+      required: ["title", "steps"]
+    }
+  },
+  {
     name: "add_domain_mapping",
     description: "A\xF1ade un mapeo local entre un dominio web y el nombre de un cliente (ej: acme.com -> Acme Corp).",
     parameters: {
@@ -22352,16 +22393,17 @@ var agentTools = [
 
 // agent/gemini-service.ts
 var GeminiService = class {
-  constructor(apiKey) {
+  constructor(apiKey, mcpManager) {
+    this.mcpManager = mcpManager;
     if (!apiKey) {
       throw new Error("La API Key de Gemini es obligatoria.");
     }
     this.ai = new GoogleGenAI2({ apiKey });
   }
   /**
-   * Envía un mensaje al modelo con soporte de streaming en tiempo real y bucle agéntico interactivo.
+   * Envía un mensaje al modelo con streaming en vivo, herramientas locales y soporte para servidores MCP.
    */
-  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = [], feedback, signal) {
+  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = [], feedback, signal, vaultBaseContext = "") {
     try {
       let sanitizedHistory = [];
       for (const msg of history) {
@@ -22384,11 +22426,30 @@ var GeminiService = class {
           parts: [{ text: "Entendido, contin\xFAa." }]
         });
       }
+      const allTools = [...agentTools];
+      if (this.mcpManager) {
+        const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
+        allTools.push(...mcpTools);
+      }
+      const systemInstruction = `Eres Fathom Assistant, el agente inteligente de \xE9lite integrado en Obsidian.
+
+DIRECTIVAS PRINCIPALES:
+1. JERARQU\xCDA DE CONTEXTO:
+   - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas espec\xEDficas, tu m\xE1xima prioridad y enfoque de an\xE1lisis debe centrarse en ese material.
+   - Autonom\xEDa y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonom\xEDa para invocar herramientas en segundo plano (leer notas con 'query_vault', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar informaci\xF3n o responder exhaustivamente.
+2. GOBERNANZA Y PERMISOS INTERACTIVOS:
+   - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmaci\xF3n en el chat.
+   - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
+3. ESTILO DE RESPUESTA:
+   - Responde siempre en formato Markdown limpio, estructurado y profesional.
+
+CONTEXTO BASE DE LA B\xD3VEDA (CLIENTES Y CONTACTOS):
+${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s de herramientas."}`;
       const createParams = {
         model: modelName,
         config: {
-          systemInstruction: "Eres Fathom Assistant, un agente inteligente para Obsidian. Tienes herramientas para consultar notas de la b\xF3veda y ejecutar comandos en Fathom Notebook. Utiliza las herramientas siempre que sea necesario para dar respuestas precisas y actualizadas. Responde en formato markdown limpio y conciso.",
-          tools: [{ functionDeclarations: agentTools }]
+          systemInstruction,
+          tools: [{ functionDeclarations: allTools }]
         }
       };
       if (sanitizedHistory.length > 0) {
@@ -22398,7 +22459,7 @@ var GeminiService = class {
       const payload = Array.isArray(promptParts) && promptParts.length === 1 && typeof promptParts[0] === "string" ? promptParts[0] : promptParts;
       let fullAccumulatedText = "";
       let currentPayload = { message: payload };
-      let maxIterations = 6;
+      let maxIterations = 8;
       while (maxIterations > 0) {
         if (signal == null ? void 0 : signal.aborted) {
           throw new Error("AbortError");
@@ -22435,27 +22496,59 @@ var GeminiService = class {
           }
           const call = pendingFunctionCalls[i];
           const stepId = `step_${Date.now()}_${i}`;
-          const initialMeta = executor.getToolMeta(call.name, call.args || {});
-          if (feedback == null ? void 0 : feedback.onStepStart) {
-            feedback.onStepStart({
-              id: stepId,
-              group: initialMeta.group,
-              displayTitle: initialMeta.displayTitle,
-              commandSnippet: initialMeta.commandSnippet,
-              status: "running"
-            });
-          }
-          const execResult = await executor.execute(call.name, call.args || {}, signal);
-          if (feedback == null ? void 0 : feedback.onStepUpdate) {
-            feedback.onStepUpdate(stepId, {
-              status: "done",
-              resultSummary: execResult.meta.resultSummary
-            });
+          let textResult = "";
+          let resultSummary = "Completado";
+          if (this.mcpManager && this.mcpManager.isMCPTool(call.name)) {
+            const mcpInfo = call.name.split("__");
+            const serverName = mcpInfo[1] || "mcp";
+            const toolName = mcpInfo.slice(2).join("__");
+            if (feedback == null ? void 0 : feedback.onStepStart) {
+              feedback.onStepStart({
+                id: stepId,
+                group: "commands",
+                displayTitle: `Ran [${serverName}] ${toolName}`,
+                status: "running"
+              });
+            }
+            try {
+              const mcpRes = await this.mcpManager.executeMCPTool(call.name, call.args || {});
+              textResult = mcpRes.resultText;
+              resultSummary = `${textResult.length} bytes`;
+            } catch (err) {
+              textResult = `Error ejecutando herramienta MCP ${call.name}: ${err.message}`;
+              resultSummary = "Error MCP";
+            }
+            if (feedback == null ? void 0 : feedback.onStepUpdate) {
+              feedback.onStepUpdate(stepId, {
+                status: "done",
+                resultSummary
+              });
+            }
+          } else {
+            const initialMeta = executor.getToolMeta(call.name, call.args || {});
+            if (feedback == null ? void 0 : feedback.onStepStart) {
+              feedback.onStepStart({
+                id: stepId,
+                group: initialMeta.group,
+                displayTitle: initialMeta.displayTitle,
+                commandSnippet: initialMeta.commandSnippet,
+                status: "running"
+              });
+            }
+            const execResult = await executor.execute(call.name, call.args || {}, signal);
+            textResult = execResult.textResult;
+            resultSummary = execResult.meta.resultSummary || "\u2713";
+            if (feedback == null ? void 0 : feedback.onStepUpdate) {
+              feedback.onStepUpdate(stepId, {
+                status: "done",
+                resultSummary
+              });
+            }
           }
           functionResponses.push({
             functionResponse: {
               name: call.name,
-              response: { result: execResult.textResult }
+              response: { result: textResult }
             }
           });
         }
@@ -22478,11 +22571,13 @@ var GeminiService = class {
 // agent/executor.ts
 var import_node_child_process = require("node:child_process");
 var import_node_util = require("node:util");
+var import_node_fs = require("node:fs");
 var execAsync = (0, import_node_util.promisify)(import_node_child_process.exec);
 var ToolExecutor = class {
-  constructor(app, fathomRepoPath) {
+  constructor(app, fathomRepoPath, handlers) {
     this.app = app;
     this.fathomRepoPath = fathomRepoPath;
+    this.handlers = handlers;
   }
   /**
    * Obtiene los metadatos visuales de la herramienta ANTES de ejecutarla (para pintar la tarjeta en vivo).
@@ -22502,6 +22597,26 @@ var ToolExecutor = class {
         return {
           group: "files",
           displayTitle: `Search vault for "${query}"`
+        };
+      }
+      case "read_local_file": {
+        const filePath = args.file_path || "";
+        const fileName = filePath.split(/[\\/]/).pop() || filePath;
+        return {
+          group: "files",
+          displayTitle: `Read ${fileName}`
+        };
+      }
+      case "request_user_permission": {
+        return {
+          group: "commands",
+          displayTitle: `Permission Request: ${args.action_title || "Action"}`
+        };
+      }
+      case "propose_implementation_plan": {
+        return {
+          group: "commands",
+          displayTitle: `Plan: ${args.title || "Implementation"}`
         };
       }
       case "add_domain_mapping": {
@@ -22556,6 +22671,7 @@ var ToolExecutor = class {
    * Ejecuta la herramienta solicitada y devuelve el resultado en texto junto a sus metadatos.
    */
   async execute(name, args, signal) {
+    var _a2, _b, _c, _d;
     const meta = this.getToolMeta(name, args);
     try {
       switch (name) {
@@ -22566,7 +22682,7 @@ var ToolExecutor = class {
             return { textResult: "No hay ninguna nota abierta actualmente.", meta };
           }
           const content = await this.app.vault.read(file);
-          meta.resultSummary = `${content.length} caracteres le\xEDdos`;
+          meta.resultSummary = `${content.length} caracteres`;
           return { textResult: `Contenido de la nota actual (${file.basename}):
 
 ${content}`, meta };
@@ -22575,7 +22691,7 @@ ${content}`, meta };
           const { query } = args;
           const files = this.app.vault.getMarkdownFiles();
           const matches = files.filter((f) => f.path.toLowerCase().includes(String(query).toLowerCase()));
-          meta.resultSummary = `${matches.length} nota(s) encontrada(s)`;
+          meta.resultSummary = `${matches.length} nota(s)`;
           if (matches.length === 0) {
             return { textResult: `No se encontraron notas que contengan: ${query}`, meta };
           }
@@ -22584,6 +22700,59 @@ ${content}`, meta };
 ` + matches.map((m) => `- ${m.path}`).join("\n"),
             meta
           };
+        }
+        case "read_local_file": {
+          const { file_path } = args;
+          if (!file_path || !(0, import_node_fs.existsSync)(file_path)) {
+            meta.resultSummary = "Archivo no encontrado";
+            return { textResult: `Error: El archivo '${file_path}' no existe o no es accesible.`, meta };
+          }
+          const content = (0, import_node_fs.readFileSync)(file_path, "utf-8");
+          meta.resultSummary = `${content.length} bytes`;
+          return { textResult: `Contenido de ${file_path}:
+
+${content}`, meta };
+        }
+        case "request_user_permission": {
+          const { action_title, action_details, danger_level = "medium" } = args;
+          const permissionKey = `perm_${action_title.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()}`;
+          if ((_b = (_a2 = this.handlers) == null ? void 0 : _a2.alwaysAllowedPermissions) == null ? void 0 : _b.includes(permissionKey)) {
+            meta.resultSummary = "Permiso concedido previamente (Aprobado siempre)";
+            return { textResult: `Permiso concedido autom\xE1ticamente por regla persistente del usuario para: ${action_title}`, meta };
+          }
+          if ((_c = this.handlers) == null ? void 0 : _c.onRequestPermission) {
+            const decision = await this.handlers.onRequestPermission(action_title, action_details, danger_level, permissionKey);
+            if (decision === "always") {
+              if (this.handlers.onAlwaysAllow) {
+                await this.handlers.onAlwaysAllow(permissionKey);
+              }
+              meta.resultSummary = "Permiso concedido permanentemente";
+              return { textResult: `El usuario ha APROBADO SIEMPRE la acci\xF3n: ${action_title}. Puedes proceder ahora y en el futuro.`, meta };
+            } else if (decision === "approved") {
+              meta.resultSummary = "Permiso concedido (una vez)";
+              return { textResult: `El usuario ha APROBADO la acci\xF3n: ${action_title}. Puedes proceder.`, meta };
+            } else {
+              meta.resultSummary = "Permiso denegado por el usuario";
+              return { textResult: `El usuario ha RECHAZADO la acci\xF3n: ${action_title}. No ejecutes esta acci\xF3n y busca una alternativa.`, meta };
+            }
+          }
+          meta.resultSummary = "Permiso concedido por defecto";
+          return { textResult: "Permiso concedido.", meta };
+        }
+        case "propose_implementation_plan": {
+          const { title, summary = "", steps = [] } = args;
+          if ((_d = this.handlers) == null ? void 0 : _d.onProposePlan) {
+            const decision = await this.handlers.onProposePlan(title, summary, steps);
+            if (decision === "approved") {
+              meta.resultSummary = "Plan aprobado por el usuario";
+              return { textResult: `El usuario ha APROBADO el plan '${title}'. Procede a ejecutar los pasos paso a paso.`, meta };
+            } else {
+              meta.resultSummary = "Plan rechazado por el usuario";
+              return { textResult: `El usuario ha RECHAZADO o pedido cambios en el plan '${title}'. Pide aclaraciones antes de continuar.`, meta };
+            }
+          }
+          meta.resultSummary = "Plan presentado";
+          return { textResult: `Plan '${title}' presentado al usuario.`, meta };
         }
         case "add_domain_mapping": {
           const { domain, company } = args;
@@ -22650,12 +22819,253 @@ ${error.stderr || ""}`;
   }
 };
 
+// agent/mcp-manager.ts
+var import_node_child_process2 = require("node:child_process");
+var import_node_fs2 = require("node:fs");
+var import_node_path = require("node:path");
+var MCPServerSession = class {
+  constructor(name, config) {
+    this.name = name;
+    this.config = config;
+    this.process = null;
+    this.messageId = 1;
+    this.pendingRequests = /* @__PURE__ */ new Map();
+    this.buffer = "";
+    this.tools = [];
+  }
+  async start() {
+    var _a2, _b;
+    if (this.process)
+      return;
+    const env2 = { ...process.env, ...this.config.env || {} };
+    const args = this.config.args || [];
+    console.log(`[MCP Manager] Iniciando servidor '${this.name}': ${this.config.command} ${args.join(" ")}`);
+    try {
+      this.process = (0, import_node_child_process2.spawn)(this.config.command, args, {
+        cwd: this.config.cwd || process.cwd(),
+        env: env2,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: process.platform === "win32"
+      });
+      (_a2 = this.process.stdout) == null ? void 0 : _a2.on("data", (data) => {
+        this.handleStdout(data.toString("utf-8"));
+      });
+      (_b = this.process.stderr) == null ? void 0 : _b.on("data", (data) => {
+        const str = data.toString("utf-8").trim();
+        if (str && !str.includes("ExperimentalWarning")) {
+          console.log(`[MCP ${this.name} stderr]:`, str);
+        }
+      });
+      this.process.on("close", (code) => {
+        console.log(`[MCP ${this.name}] Proceso cerrado con c\xF3digo ${code}`);
+        this.process = null;
+      });
+      await this.sendRequest("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "fathom-assistant", version: "1.0.0" }
+      });
+      this.sendNotification("notifications/initialized", {});
+      const toolsResponse = await this.sendRequest("tools/list", {});
+      this.tools = (toolsResponse == null ? void 0 : toolsResponse.tools) || [];
+      console.log(`[MCP ${this.name}] ${this.tools.length} herramientas cargadas con \xE9xito.`);
+    } catch (err) {
+      console.error(`[MCP ${this.name}] Error iniciando servidor:`, err);
+      this.stop();
+      throw err;
+    }
+  }
+  handleStdout(chunk) {
+    this.buffer += chunk;
+    const lines = this.buffer.split("\n");
+    this.buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed)
+        continue;
+      try {
+        const msg = JSON.parse(trimmed);
+        if (msg.id !== void 0 && this.pendingRequests.has(msg.id)) {
+          const req = this.pendingRequests.get(msg.id);
+          this.pendingRequests.delete(msg.id);
+          if (req.timer)
+            clearTimeout(req.timer);
+          if (msg.error) {
+            req.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+          } else {
+            req.resolve(msg.result);
+          }
+        }
+      } catch (err) {
+      }
+    }
+  }
+  sendRequest(method, params, timeoutMs = 45e3) {
+    if (!this.process || !this.process.stdin) {
+      return Promise.reject(new Error(`El servidor MCP '${this.name}' no est\xE1 iniciado.`));
+    }
+    const id = this.messageId++;
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingRequests.has(id)) {
+          this.pendingRequests.delete(id);
+          reject(new Error(`Timeout esperando respuesta de MCP '${this.name}' (${method})`));
+        }
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.process.stdin.write(payload);
+    });
+  }
+  sendNotification(method, params) {
+    if (!this.process || !this.process.stdin)
+      return;
+    const payload = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
+    this.process.stdin.write(payload);
+  }
+  async callTool(toolName, args) {
+    const response = await this.sendRequest("tools/call", {
+      name: toolName,
+      arguments: args || {}
+    });
+    if ((response == null ? void 0 : response.content) && Array.isArray(response.content)) {
+      return response.content.map((c) => c.text || JSON.stringify(c)).join("\n");
+    }
+    return JSON.stringify(response);
+  }
+  stop() {
+    if (this.process) {
+      try {
+        this.process.kill();
+      } catch (e) {
+      }
+      this.process = null;
+    }
+    this.pendingRequests.clear();
+  }
+};
+var MCPManager = class {
+  constructor(pluginDir) {
+    this.sessions = /* @__PURE__ */ new Map();
+    this.configPath = (0, import_node_path.join)(pluginDir, "mcp-config.json");
+  }
+  /**
+   * Carga la configuración local y levanta los servidores activos.
+   */
+  async initialize() {
+    if (!(0, import_node_fs2.existsSync)(this.configPath)) {
+      console.log(`[MCP Manager] No se encontr\xF3 mcp-config.json en ${this.configPath}`);
+      return;
+    }
+    try {
+      const raw = (0, import_node_fs2.readFileSync)(this.configPath, "utf-8");
+      const config = JSON.parse(raw);
+      for (const [name, serverCfg] of Object.entries(config.mcpServers || {})) {
+        if (serverCfg.disabled) {
+          console.log(`[MCP Manager] Servidor '${name}' deshabilitado en configuraci\xF3n.`);
+          continue;
+        }
+        const session = new MCPServerSession(name, serverCfg);
+        this.sessions.set(name, session);
+        session.start().catch((err) => {
+          console.warn(`[MCP Manager] No se pudo inicializar servidor '${name}':`, err.message);
+        });
+      }
+    } catch (err) {
+      console.error("[MCP Manager] Error leyendo mcp-config.json:", err);
+    }
+  }
+  /**
+   * Transforma las herramientas de todos los servidores MCP activos a FunctionDeclarations de Gemini.
+   */
+  getGeminiFunctionDeclarations() {
+    var _a2, _b;
+    const declarations = [];
+    for (const [serverName, session] of this.sessions.entries()) {
+      for (const tool of session.tools) {
+        const functionName = `mcp__${serverName}__${tool.name}`.replace(/[^a-zA-Z0-9_]/g, "_");
+        const properties = {};
+        const required = ((_a2 = tool.inputSchema) == null ? void 0 : _a2.required) || [];
+        if ((_b = tool.inputSchema) == null ? void 0 : _b.properties) {
+          for (const [propName, propDef] of Object.entries(tool.inputSchema.properties)) {
+            properties[propName] = {
+              type: this.mapSchemaType(propDef.type),
+              description: propDef.description || ""
+            };
+          }
+        }
+        declarations.push({
+          name: functionName,
+          description: `[MCP: ${serverName}] ${tool.description || tool.name}`,
+          parameters: {
+            type: Type.OBJECT,
+            properties,
+            required
+          }
+        });
+      }
+    }
+    return declarations;
+  }
+  mapSchemaType(typeStr) {
+    switch (typeStr) {
+      case "string":
+        return Type.STRING;
+      case "number":
+      case "integer":
+        return Type.NUMBER;
+      case "boolean":
+        return Type.BOOLEAN;
+      case "array":
+        return Type.ARRAY;
+      case "object":
+        return Type.OBJECT;
+      default:
+        return Type.STRING;
+    }
+  }
+  /**
+   * Comprueba si una llamada de función pertenece a un servidor MCP.
+   */
+  isMCPTool(functionName) {
+    return functionName.startsWith("mcp__");
+  }
+  /**
+   * Ejecuta una llamada de herramienta MCP.
+   */
+  async executeMCPTool(functionName, args) {
+    const parts = functionName.split("__");
+    if (parts.length < 3) {
+      throw new Error(`Nombre de herramienta MCP inv\xE1lido: ${functionName}`);
+    }
+    const serverName = parts[1];
+    const toolName = parts.slice(2).join("__");
+    const session = this.sessions.get(serverName);
+    if (!session) {
+      throw new Error(`Servidor MCP '${serverName}' no encontrado o no est\xE1 activo.`);
+    }
+    const resultText = await session.callTool(toolName, args);
+    return { serverName, originalToolName: toolName, resultText };
+  }
+  /**
+   * Cierra todos los servidores al apagar el plugin.
+   */
+  closeAll() {
+    for (const session of this.sessions.values()) {
+      session.stop();
+    }
+    this.sessions.clear();
+  }
+};
+
 // main.ts
 var DEFAULT_SETTINGS = {
   geminiApiKey: "",
   fathomRepoPath: "",
   geminiModel: "gemini-3.7-flash",
-  chatsFolder: "Fathom Chats"
+  chatsFolder: "Fathom Chats",
+  alwaysAllowedPermissions: [],
+  autoInjectClientContext: true
 };
 var VIEW_TYPE_FATHOM_CHAT = "fathom-chat-view";
 var BotActivityTracker = class {
@@ -22697,7 +23107,6 @@ var BotActivityTracker = class {
     }
     this.filesGroupEl.empty();
     const count = this.filesSteps.length;
-    const isRunning = this.filesSteps.some((s) => s.status === "running");
     const headerTitle = `Explored ${count} file${count === 1 ? "" : "s"}`;
     const header = this.filesGroupEl.createDiv({ cls: "fathom-activity-header" });
     header.createSpan({ text: headerTitle });
@@ -22911,6 +23320,7 @@ var FathomChatView = class extends import_obsidian.ItemView {
       }
       const botMsgDiv = this.chatBoxEl.createDiv({ cls: "chat-message chat-message-bot" });
       const activityTracker = new BotActivityTracker(botMsgDiv);
+      const interactiveCardsEl = botMsgDiv.createDiv({ cls: "fathom-interactive-cards" });
       const contentDiv = botMsgDiv.createDiv({ cls: "chat-message-content" });
       this.scrollToBottom();
       let accumulatedResponseText = "";
@@ -22925,29 +23335,30 @@ var FathomChatView = class extends import_obsidian.ItemView {
         }
         let finalPrompt = text || "Analiza el/los archivos adjuntos.";
         if (this.activeContextItems.length > 0) {
-          let contextStr = "CONTEXTO DE OBSIDIAN ADJUNTO:\n\n";
+          let contextStr = "=== CONTEXTO MANUAL ADJUNTO POR EL USUARIO (FOCO PRIORITARIO) ===\n\n";
           for (const item of this.activeContextItems) {
             if (item instanceof import_obsidian.TFile && item.extension === "md") {
               const content = await this.app.vault.read(item);
-              contextStr += `--- ARCHIVO: ${item.path} ---
+              contextStr += `--- NOTA ADJUNTA: ${item.path} ---
 ${content}
---- FIN ARCHIVO ---
+--- FIN NOTA ---
 
 `;
             } else if (item instanceof import_obsidian.TFolder) {
               const filesInFolder = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(item.path + "/"));
               for (const f of filesInFolder) {
                 const content = await this.app.vault.read(f);
-                contextStr += `--- ARCHIVO EN CARPETA (${item.path}): ${f.path} ---
+                contextStr += `--- NOTA EN CARPETA ADJUNTA (${item.path}): ${f.path} ---
 ${content}
---- FIN ARCHIVO ---
+--- FIN NOTA ---
 
 `;
               }
             }
           }
-          finalPrompt = `${contextStr}Pregunta/Petici\xF3n basada en el contexto:
+          finalPrompt = `${contextStr}=== FIN CONTEXTO ADJUNTO ===
 
+Petici\xF3n del usuario:
 ${finalPrompt}`;
         }
         const promptParts = [];
@@ -22959,8 +23370,77 @@ ${finalPrompt}`;
         }
         const displayedUserText = text || `[Adjuntos enviados]`;
         this.chatHistory.push({ role: "user", text: displayedUserText });
-        const service = new GeminiService(apiKey);
-        const executor = new ToolExecutor(this.app, repoPath);
+        const vaultBaseContext = await this.getVaultBaseContext();
+        const executor = new ToolExecutor(this.app, repoPath, {
+          alwaysAllowedPermissions: this.plugin.settings.alwaysAllowedPermissions || [],
+          onAlwaysAllow: async (key) => {
+            if (!this.plugin.settings.alwaysAllowedPermissions) {
+              this.plugin.settings.alwaysAllowedPermissions = [];
+            }
+            if (!this.plugin.settings.alwaysAllowedPermissions.includes(key)) {
+              this.plugin.settings.alwaysAllowedPermissions.push(key);
+              await this.plugin.saveSettings();
+            }
+          },
+          onRequestPermission: (permTitle, permDetails, dangerLevel, permKey) => {
+            return new Promise((resolve) => {
+              const card = interactiveCardsEl.createDiv({ cls: "fathom-permission-card" });
+              const pHeader = card.createDiv({ cls: "fathom-permission-header" });
+              pHeader.innerHTML = `\u26A0\uFE0F <span>Permiso Requerido: ${permTitle}</span>`;
+              const pDetails = card.createDiv({ cls: "fathom-permission-details", text: permDetails });
+              const actions = card.createDiv({ cls: "fathom-permission-actions" });
+              const btnApprove = actions.createEl("button", { cls: "btn-perm-approve", text: "Aprobar una vez" });
+              const btnAlways = actions.createEl("button", { cls: "btn-perm-always", text: "\u{1F512} Aprobar siempre" });
+              const btnReject = actions.createEl("button", { cls: "btn-perm-reject", text: "Rechazar" });
+              const finalize = (choice) => {
+                btnApprove.disabled = true;
+                btnAlways.disabled = true;
+                btnReject.disabled = true;
+                actions.empty();
+                actions.createSpan({ cls: "fathom-item-status done", text: `Elecci\xF3n: ${choice}` });
+                this.scrollToBottom();
+              };
+              btnApprove.onclick = () => {
+                finalize("Aprobado una vez");
+                resolve("approved");
+              };
+              btnAlways.onclick = () => {
+                finalize("Aprobado siempre (guardado en memoria)");
+                resolve("always");
+              };
+              btnReject.onclick = () => {
+                finalize("Rechazado");
+                resolve("rejected");
+              };
+              this.scrollToBottom();
+            });
+          },
+          onProposePlan: (planTitle, planSummary, planSteps) => {
+            return new Promise((resolve) => {
+              const card = interactiveCardsEl.createDiv({ cls: "fathom-plan-card" });
+              const pTitle = card.createDiv({ cls: "fathom-plan-title" });
+              pTitle.innerHTML = `\u{1F4CB} <span>Plan de Acci\xF3n: ${planTitle}</span>`;
+              if (planSummary) {
+                card.createDiv({ cls: "fathom-plan-summary", text: planSummary });
+              }
+              const stepsList = card.createDiv({ cls: "fathom-plan-steps" });
+              planSteps.forEach((step, idx) => {
+                const stepEl = stepsList.createDiv({ cls: "fathom-plan-step" });
+                stepEl.createSpan({ cls: "fathom-plan-step-num", text: `${idx + 1}.` });
+                stepEl.createSpan({ text: step });
+              });
+              const actions = card.createDiv({ cls: "fathom-plan-actions" });
+              const btnProceed = actions.createEl("button", { cls: "btn-plan-proceed", text: "\u{1F680} Proceder con el Plan" });
+              btnProceed.onclick = () => {
+                btnProceed.disabled = true;
+                btnProceed.textContent = "\u2713 Plan Aprobado";
+                resolve("approved");
+              };
+              this.scrollToBottom();
+            });
+          }
+        });
+        const service = new GeminiService(apiKey, this.plugin.mcpManager);
         const abortPromise = new Promise((_, reject) => {
           this.currentAbortResolver = reject;
         });
@@ -22987,7 +23467,8 @@ ${finalPrompt}`;
             model,
             this.chatHistory.slice(0, -1),
             feedback,
-            this.currentAbortController.signal
+            this.currentAbortController.signal,
+            vaultBaseContext
           ),
           abortPromise
         ]);
@@ -23015,7 +23496,7 @@ ${finalPrompt}`;
           this.chatHistory.pop();
         } else {
           contentDiv.empty();
-          import_obsidian.MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para m\xE1s detalles.`, contentDiv, "", new import_obsidian.Component());
+          import_obsidian.MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`, contentDiv, "", new import_obsidian.Component());
           this.chatHistory.pop();
         }
       } finally {
@@ -23052,6 +23533,32 @@ ${finalPrompt}`;
       this.startNewChat();
     }
   }
+  // --- CARGA DE CONTEXTO BASE DE CLIENTES Y CONTACTOS ---
+  async getVaultBaseContext() {
+    if (!this.plugin.settings.autoInjectClientContext) {
+      return "";
+    }
+    let baseStr = "";
+    const contactsFile = this.app.vault.getAbstractFileByPath("contacts.md");
+    if (contactsFile instanceof import_obsidian.TFile) {
+      try {
+        const content = await this.app.vault.read(contactsFile);
+        baseStr += `--- DIRECTORIO GENERAL DE CONTACTOS (contacts.md) ---
+${content}
+
+`;
+      } catch (e) {
+      }
+    }
+    const rootFolders = this.app.vault.getRoot().children.filter((f) => f instanceof import_obsidian.TFolder && !f.name.startsWith(".") && f.name !== "Fathom Chats");
+    if (rootFolders.length > 0) {
+      baseStr += `--- CARPETAS DE CLIENTES EN LA B\xD3VEDA ---
+${rootFolders.map((f) => `- ${f.name}`).join("\n")}
+
+`;
+    }
+    return baseStr;
+  }
   // --- UI STATE UPDATER ---
   updateSendBtnState() {
     if (!this.sendBtnEl)
@@ -23077,7 +23584,7 @@ ${finalPrompt}`;
     }
   }
   // ----------------------------------------------------
-  // GESTIÓN DE ARCHIVOS DE HISTORIAL
+  // GESTIÓN DE HISTORIAL
   // ----------------------------------------------------
   async getChatsFolder() {
     const folderPath = this.plugin.settings.chatsFolder;
@@ -23184,9 +23691,6 @@ ${msg.text}
       this.titleInputEl.value = this.currentChatFile.basename;
     }
   }
-  // ----------------------------------------------------
-  // GESTIÓN DE CONTEXTO Y ADJUNTOS
-  // ----------------------------------------------------
   addContextItem(file) {
     if (!this.activeContextItems.some((item) => item.path === file.path)) {
       this.activeContextItems.push(file);
@@ -23271,12 +23775,14 @@ var FathomAssistantPlugin = class extends import_obsidian.Plugin {
   async onload() {
     console.log("Cargando Fathom Assistant Plugin...");
     await this.loadSettings();
+    const pluginDir = this.app.vault.adapter.basePath ? `${this.app.vault.adapter.basePath}/.obsidian/plugins/fathom-assistant` : ".";
+    this.mcpManager = new MCPManager(pluginDir);
+    this.mcpManager.initialize().catch((err) => console.warn("FATHOM_DEBUG - MCP Manager init:", err));
     try {
       let currentFilters = this.app.vault.getConfig("userIgnoreFilters") || [];
       if (!currentFilters.includes(this.settings.chatsFolder)) {
         currentFilters.push(this.settings.chatsFolder);
         this.app.vault.setConfig("userIgnoreFilters", currentFilters);
-        console.log(`FATHOM_DEBUG - Carpeta '${this.settings.chatsFolder}' auto-excluida del sistema.`);
       }
     } catch (e) {
       console.warn("FATHOM_DEBUG - No se pudo excluir la carpeta autom\xE1ticamente", e);
@@ -23312,6 +23818,11 @@ var FathomAssistantPlugin = class extends import_obsidian.Plugin {
         }
       })
     );
+  }
+  async onunload() {
+    if (this.mcpManager) {
+      this.mcpManager.closeAll();
+    }
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -23355,6 +23866,43 @@ var FathomAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.chatsFolder = value.trim();
       await this.plugin.saveSettings();
     }));
+    new import_obsidian.Setting(containerEl).setName("Contexto de Clientes y Contactos por defecto").setDesc("Inyectar autom\xE1ticamente el directorio contacts.md y la lista de clientes en las instrucciones base.").addToggle((toggle) => {
+      var _a2;
+      return toggle.setValue((_a2 = this.plugin.settings.autoInjectClientContext) != null ? _a2 : true).onChange(async (value) => {
+        this.plugin.settings.autoInjectClientContext = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    containerEl.createEl("h3", { text: "\u{1F512} Gobernanza y Memoria de Permisos" });
+    const allowed = this.plugin.settings.alwaysAllowedPermissions || [];
+    if (allowed.length === 0) {
+      containerEl.createEl("p", {
+        text: "No tienes permisos concedidos permanentemente. El asistente solicitar\xE1 tu aprobaci\xF3n interactiva en el chat cuando intente acciones de impacto.",
+        cls: "setting-item-description"
+      });
+    } else {
+      containerEl.createEl("p", {
+        text: `Tienes ${allowed.length} acci\xF3n(es) autorizadas permanentemente:`,
+        cls: "setting-item-description"
+      });
+      for (const permKey of allowed) {
+        new import_obsidian.Setting(containerEl).setName(permKey.replace(/^perm_/, "").replace(/_/g, " ")).addButton((btn) => btn.setButtonText("Revocar Permiso").setWarning().onClick(async () => {
+          this.plugin.settings.alwaysAllowedPermissions = this.plugin.settings.alwaysAllowedPermissions.filter((k) => k !== permKey);
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+      }
+      new import_obsidian.Setting(containerEl).setName("Restablecer todos los permisos").setDesc("Elimina todas las autorizaciones permanentes guardadas.").addButton((btn) => btn.setButtonText("Olvidar Todos").onClick(async () => {
+        this.plugin.settings.alwaysAllowedPermissions = [];
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+    }
+    containerEl.createEl("h3", { text: "\u{1F50C} Servidores MCP (Model Context Protocol)" });
+    containerEl.createEl("p", {
+      text: "Los servidores MCP se gestionan de forma independiente en el archivo mcp-config.json del plugin (soporta notebooklm, sqlserver, etc.).",
+      cls: "setting-item-description"
+    });
   }
 };
 /*! Bundled license information:

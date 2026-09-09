@@ -1,6 +1,7 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, FunctionDeclaration } from '@google/genai';
 import { agentTools } from './tools';
-import { ToolExecutor, ToolExecutionMeta } from './executor';
+import { ToolExecutor } from './executor';
+import { MCPManager } from './mcp-manager';
 
 export interface AgentActivityStep {
   id: string;
@@ -20,7 +21,7 @@ export interface AgentUIFeedback {
 export class GeminiService {
   private ai: GoogleGenAI;
   
-  constructor(apiKey: string) {
+  constructor(apiKey: string, private mcpManager?: MCPManager) {
     if (!apiKey) {
       throw new Error('La API Key de Gemini es obligatoria.');
     }
@@ -28,7 +29,7 @@ export class GeminiService {
   }
   
   /**
-   * Envía un mensaje al modelo con soporte de streaming en tiempo real y bucle agéntico interactivo.
+   * Envía un mensaje al modelo con streaming en vivo, herramientas locales y soporte para servidores MCP.
    */
   async sendMessage(
     promptParts: any, 
@@ -36,7 +37,8 @@ export class GeminiService {
     modelName: string = 'gemini-3.7-flash', 
     history: {role: string, text: string}[] = [],
     feedback?: AgentUIFeedback,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    vaultBaseContext: string = ''
   ): Promise<string> {
     try {
       let sanitizedHistory: any[] = [];
@@ -64,11 +66,34 @@ export class GeminiService {
          });
       }
 
+      // 1. Recopilar herramientas locales y herramientas MCP
+      const allTools: FunctionDeclaration[] = [...agentTools];
+      if (this.mcpManager) {
+        const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
+        allTools.push(...mcpTools);
+      }
+
+      // 2. Construir System Instructions con jerarquía de contexto y gobernanza
+      const systemInstruction = `Eres Fathom Assistant, el agente inteligente de élite integrado en Obsidian.
+
+DIRECTIVAS PRINCIPALES:
+1. JERARQUÍA DE CONTEXTO:
+   - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas específicas, tu máxima prioridad y enfoque de análisis debe centrarse en ese material.
+   - Autonomía y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonomía para invocar herramientas en segundo plano (leer notas con 'query_vault', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar información o responder exhaustivamente.
+2. GOBERNANZA Y PERMISOS INTERACTIVOS:
+   - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmación en el chat.
+   - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
+3. ESTILO DE RESPUESTA:
+   - Responde siempre en formato Markdown limpio, estructurado y profesional.
+
+CONTEXTO BASE DE LA BÓVEDA (CLIENTES Y CONTACTOS):
+${vaultBaseContext || 'Directorio de contactos y clientes disponible a través de herramientas.'}`;
+
       const createParams: any = {
         model: modelName,
         config: {
-          systemInstruction: 'Eres Fathom Assistant, un agente inteligente para Obsidian. Tienes herramientas para consultar notas de la bóveda y ejecutar comandos en Fathom Notebook. Utiliza las herramientas siempre que sea necesario para dar respuestas precisas y actualizadas. Responde en formato markdown limpio y conciso.',
-          tools: [{ functionDeclarations: agentTools }]
+          systemInstruction,
+          tools: [{ functionDeclarations: allTools }]
         }
       };
 
@@ -78,14 +103,13 @@ export class GeminiService {
 
       const chat = this.ai.chats.create(createParams);
       
-      // El SDK v2.x exige pasar los parámetros bajo la key `message`
       const payload = (Array.isArray(promptParts) && promptParts.length === 1 && typeof promptParts[0] === 'string')
         ? promptParts[0]
         : promptParts;
         
       let fullAccumulatedText = '';
       let currentPayload: any = { message: payload };
-      let maxIterations = 6;
+      let maxIterations = 8;
 
       while (maxIterations > 0) {
         if (signal?.aborted) {
@@ -119,12 +143,12 @@ export class GeminiService {
           }
         }
 
-        // Si no hay herramientas que ejecutar, hemos terminado el turno
+        // Si no hay herramientas que ejecutar, terminamos el turno
         if (pendingFunctionCalls.length === 0) {
           break;
         }
 
-        // Ejecutar las herramientas solicitadas emitiendo feedback visual estilo Antigravity
+        // Ejecutar las herramientas solicitadas (Locales o MCP)
         const functionResponses: any[] = [];
         for (let i = 0; i < pendingFunctionCalls.length; i++) {
           if (signal?.aborted) {
@@ -133,39 +157,74 @@ export class GeminiService {
 
           const call = pendingFunctionCalls[i];
           const stepId = `step_${Date.now()}_${i}`;
-          const initialMeta = executor.getToolMeta(call.name, call.args || {});
+          let textResult = '';
+          let resultSummary = 'Completado';
 
-          // 1. Notificar inicio de la herramienta a la UI
-          if (feedback?.onStepStart) {
-            feedback.onStepStart({
-              id: stepId,
-              group: initialMeta.group,
-              displayTitle: initialMeta.displayTitle,
-              commandSnippet: initialMeta.commandSnippet,
-              status: 'running'
-            });
-          }
+          if (this.mcpManager && this.mcpManager.isMCPTool(call.name)) {
+            // --- HERRAMIENTA MCP ---
+            const mcpInfo = call.name.split('__');
+            const serverName = mcpInfo[1] || 'mcp';
+            const toolName = mcpInfo.slice(2).join('__');
 
-          // 2. Ejecución física de la herramienta
-          const execResult = await executor.execute(call.name, call.args || {}, signal);
+            if (feedback?.onStepStart) {
+              feedback.onStepStart({
+                id: stepId,
+                group: 'commands',
+                displayTitle: `Ran [${serverName}] ${toolName}`,
+                status: 'running'
+              });
+            }
 
-          // 3. Notificar finalización a la UI
-          if (feedback?.onStepUpdate) {
-            feedback.onStepUpdate(stepId, {
-              status: 'done',
-              resultSummary: execResult.meta.resultSummary
-            });
+            try {
+              const mcpRes = await this.mcpManager.executeMCPTool(call.name, call.args || {});
+              textResult = mcpRes.resultText;
+              resultSummary = `${textResult.length} bytes`;
+            } catch (err: any) {
+              textResult = `Error ejecutando herramienta MCP ${call.name}: ${err.message}`;
+              resultSummary = 'Error MCP';
+            }
+
+            if (feedback?.onStepUpdate) {
+              feedback.onStepUpdate(stepId, {
+                status: 'done',
+                resultSummary
+              });
+            }
+          } else {
+            // --- HERRAMIENTA LOCAL ---
+            const initialMeta = executor.getToolMeta(call.name, call.args || {});
+
+            if (feedback?.onStepStart) {
+              feedback.onStepStart({
+                id: stepId,
+                group: initialMeta.group,
+                displayTitle: initialMeta.displayTitle,
+                commandSnippet: initialMeta.commandSnippet,
+                status: 'running'
+              });
+            }
+
+            const execResult = await executor.execute(call.name, call.args || {}, signal);
+            textResult = execResult.textResult;
+            resultSummary = execResult.meta.resultSummary || '✓';
+
+            if (feedback?.onStepUpdate) {
+              feedback.onStepUpdate(stepId, {
+                status: 'done',
+                resultSummary
+              });
+            }
           }
 
           functionResponses.push({
             functionResponse: {
               name: call.name,
-              response: { result: execResult.textResult }
+              response: { result: textResult }
             }
           });
         }
 
-        // 4. Devolver las respuestas de las funciones al modelo para la siguiente iteración
+        // Devolver las respuestas al modelo
         currentPayload = {
           message: functionResponses as any
         };
