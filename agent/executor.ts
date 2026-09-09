@@ -1,7 +1,8 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, existsSync } from 'node:fs';
-import { App, TFile } from 'obsidian';
+import { App, TFile, TFolder } from 'obsidian';
+import { PdaManager, SMARTLIST_BLOCK_REGEX } from './pda-manager';
 
 const execAsync = promisify(exec);
 
@@ -30,11 +31,15 @@ export interface InteractiveHandlers {
  * Encargado de ejecutar físicamente las llamadas a herramientas que el LLM decide invocar.
  */
 export class ToolExecutor {
+  private pdaManager: PdaManager;
+
   constructor(
     private app: App, 
     private fathomRepoPath: string,
     private handlers?: InteractiveHandlers
-  ) {}
+  ) {
+    this.pdaManager = new PdaManager(app);
+  }
 
   /**
    * Obtiene los metadatos visuales de la herramienta ANTES de ejecutarla (para pintar la tarjeta en vivo).
@@ -70,6 +75,48 @@ export class ToolExecutor {
         return {
           group: 'files',
           displayTitle: `Read ${fileName}`
+        };
+      }
+      case 'get_client_pda': {
+        const client = args.client || 'Client';
+        return {
+          group: 'files',
+          displayTitle: `Read PDA: ${client}`
+        };
+      }
+      case 'add_pda_action': {
+        const client = args.client || 'Client';
+        return {
+          group: 'commands',
+          displayTitle: `Add action to PDA: ${client}`
+        };
+      }
+      case 'complete_pda_action': {
+        const client = args.client || 'Client';
+        return {
+          group: 'commands',
+          displayTitle: `Complete action in PDA: ${client}`
+        };
+      }
+      case 'list_recent_meetings': {
+        const client = args.client ? ` (${args.client})` : '';
+        return {
+          group: 'files',
+          displayTitle: `List meetings${client}`
+        };
+      }
+      case 'get_meeting_summary': {
+        const client = args.client || 'Client';
+        return {
+          group: 'files',
+          displayTitle: `Summary: ${client} meeting`
+        };
+      }
+      case 'search_meeting_transcripts': {
+        const query = args.query || '';
+        return {
+          group: 'files',
+          displayTitle: `Search transcripts: "${query}"`
         };
       }
       case 'request_user_permission': {
@@ -140,6 +187,7 @@ export class ToolExecutor {
     const meta = this.getToolMeta(name, args);
     try {
       switch (name) {
+        // ─── LECTURA BÁSICA ───
         case 'read_current_note': {
           const file = this.app.workspace.getActiveFile();
           if (!file) {
@@ -186,7 +234,6 @@ export class ToolExecutor {
           const query = rawQuery.toLowerCase();
           const files = this.app.vault.getMarkdownFiles();
           
-          // 1. Coincidencias por nombre de archivo o ruta
           const pathMatches = files.filter(f => f.path.toLowerCase().includes(query) || f.basename.toLowerCase().includes(query));
           if (pathMatches.length > 0) {
             meta.resultSummary = `${pathMatches.length} nota(s)`;
@@ -196,7 +243,6 @@ export class ToolExecutor {
             };
           }
 
-          // 2. Búsqueda de contenido si no hay coincidencias de nombre
           const contentMatches: { path: string, snippet: string }[] = [];
           for (const file of files) {
             try {
@@ -230,7 +276,6 @@ export class ToolExecutor {
             return { textResult: 'Error: No se especificó ninguna ruta de archivo.', meta };
           }
 
-          // 1. Comprobar ruta directa en el sistema de archivos
           if (existsSync(file_path)) {
             try {
               const content = readFileSync(file_path, 'utf-8');
@@ -242,7 +287,6 @@ export class ToolExecutor {
             }
           }
 
-          // 2. Buscar en la bóveda de Obsidian por ruta relativa o nombre de archivo
           const cleanPath = String(file_path).replace(/^[\\/]/, '');
           let vaultFile = this.app.vault.getAbstractFileByPath(cleanPath) || this.app.vault.getAbstractFileByPath(cleanPath + '.md');
           
@@ -267,11 +311,55 @@ export class ToolExecutor {
           return { textResult: `Error: El archivo '${file_path}' no existe en el sistema de archivos ni en la bóveda de Obsidian.`, meta };
         }
 
+        // ─── GESTIÓN DE PLANES DE ACCIÓN (PDA) ───
+        case 'get_client_pda': {
+          const { client, status, assignee } = args;
+          const result = await this.pdaManager.getClientActions(client, { status, assignee });
+          meta.resultSummary = result.includes('### Plan de Acción') ? 'PDA consultado' : 'Sin tareas';
+          return { textResult: result, meta };
+        }
+
+        case 'add_pda_action': {
+          const { client, task, assignee, priority, deadline } = args;
+          const res = await this.pdaManager.addAction(client, task, assignee, priority, deadline);
+          meta.resultSummary = res.success ? 'Acción añadida' : 'Error';
+          return { textResult: res.message, meta };
+        }
+
+        case 'complete_pda_action': {
+          const { client, query_or_id } = args;
+          const res = await this.pdaManager.updateActionStatus(client, query_or_id, 'Completado');
+          meta.resultSummary = res.success ? 'Acción completada' : 'No encontrada';
+          return { textResult: res.message, meta };
+        }
+
+        // ─── CONSULTAS DE REUNIONES Y MINUTAS DE FATHOM ───
+        case 'list_recent_meetings': {
+          const { client, limit = 5 } = args;
+          const result = await this.listRecentMeetings(client, Number(limit));
+          meta.resultSummary = `${result.count} reuniones`;
+          return { textResult: result.text, meta };
+        }
+
+        case 'get_meeting_summary': {
+          const { client, meeting_id_or_date } = args;
+          const result = await this.getMeetingSummary(client, meeting_id_or_date);
+          meta.resultSummary = result.found ? 'Minuta leída' : 'No encontrada';
+          return { textResult: result.text, meta };
+        }
+
+        case 'search_meeting_transcripts': {
+          const { query, client } = args;
+          const result = await this.searchTranscripts(query, client);
+          meta.resultSummary = `${result.matchesCount} mención(es)`;
+          return { textResult: result.text, meta };
+        }
+
+        // ─── GOBERNANZA Y PLANIFICACIÓN ───
         case 'request_user_permission': {
           const { action_title, action_details, danger_level = 'medium' } = args;
           const permissionKey = `perm_${action_title.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
 
-          // Comprobar si ya está en la memoria de permisos persistente
           if (this.handlers?.alwaysAllowedPermissions?.includes(permissionKey)) {
             meta.resultSummary = 'Permiso concedido previamente (Aprobado siempre)';
             return { textResult: `Permiso concedido automáticamente por regla persistente del usuario para: ${action_title}`, meta };
@@ -313,6 +401,7 @@ export class ToolExecutor {
           return { textResult: `Plan '${title}' presentado al usuario.`, meta };
         }
 
+        // ─── ACCIONES DEL BACKEND DE FATHOM NOTEBOOK ───
         case 'add_domain_mapping': {
           const { domain, company } = args;
           const output = await this.runCliCommand(`npm run cli add-mapping "${domain}" "${company}"`, signal);
@@ -354,6 +443,142 @@ export class ToolExecutor {
       meta.resultSummary = `Error: ${error.message}`;
       return { textResult: `Excepción ejecutando herramienta ${name}: ${error.message}`, meta };
     }
+  }
+
+  // ─── MÉTODOS DE APOYO PARA REUNIONES Y TRANSCRIPCIONES ───
+
+  private async listRecentMeetings(clientFilter?: string, limit: number = 5): Promise<{ text: string; count: number }> {
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const minutasFiles = markdownFiles.filter(f => f.name.toLowerCase() === 'minutas.md' || f.name.toLowerCase().endsWith('- minutas.md'));
+
+    const meetings: { client: string; meetingName: string; path: string; date: string }[] = [];
+
+    for (const f of minutasFiles) {
+      const parts = f.path.split(/[\\/]/);
+      // Estructura esperada: CLIENTE/YYYY-MM-DD - Titulo/minutas.md
+      if (parts.length >= 3) {
+        const clientName = parts[parts.length - 3];
+        const meetingFolder = parts[parts.length - 2];
+        const dateMatch = meetingFolder.match(/^(\d{4}-\d{2}-\d{2})/);
+        const date = dateMatch ? dateMatch[1] : '';
+
+        if (clientFilter) {
+          const cleanFilter = clientFilter.toLowerCase().trim();
+          if (!clientName.toLowerCase().includes(cleanFilter)) continue;
+        }
+
+        meetings.push({
+          client: clientName,
+          meetingName: meetingFolder,
+          path: f.path,
+          date
+        });
+      }
+    }
+
+    meetings.sort((a, b) => b.date.localeCompare(a.date));
+    const sliced = meetings.slice(0, Math.max(1, limit));
+
+    if (sliced.length === 0) {
+      return {
+        text: clientFilter 
+          ? `No se encontraron reuniones de Fathom archivadas para el cliente '${clientFilter}'.` 
+          : 'No se encontraron reuniones de Fathom en la bóveda.',
+        count: 0
+      };
+    }
+
+    const listText = sliced.map((m, i) => `${i + 1}. **${m.date || 'Sin fecha'}** — *${m.client}*: ${m.meetingName} (\`${m.path}\`)`).join('\n');
+    return {
+      text: `### Reuniones recientes de Fathom (${sliced.length} mostradas):\n\n${listText}`,
+      count: sliced.length
+    };
+  }
+
+  private async getMeetingSummary(client: string, meetingIdOrDate?: string): Promise<{ text: string; found: boolean }> {
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const cleanClient = client.toLowerCase().trim();
+    const clientMinutas = markdownFiles.filter(f => {
+      const p = f.path.toLowerCase();
+      return p.includes(cleanClient) && (f.name.toLowerCase() === 'minutas.md' || f.basename.toLowerCase().includes('minutas'));
+    });
+
+    if (clientMinutas.length === 0) {
+      return { text: `No se encontraron minutas para el cliente '${client}'.`, found: false };
+    }
+
+    // Ordenar de más reciente a más antigua
+    clientMinutas.sort((a, b) => b.path.localeCompare(a.path));
+
+    let targetFile = clientMinutas[0];
+    if (meetingIdOrDate && meetingIdOrDate.toLowerCase() !== 'latest' && meetingIdOrDate.toLowerCase() !== 'ultima') {
+      const targetQuery = meetingIdOrDate.toLowerCase().trim();
+      const match = clientMinutas.find(f => f.path.toLowerCase().includes(targetQuery));
+      if (match) targetFile = match;
+    }
+
+    const rawContent = await this.app.vault.read(targetFile);
+    // Limpiar bloque smartlist para dejar solo el resumen ejecutivo y acuerdos
+    const cleanContent = rawContent.replace(SMARTLIST_BLOCK_REGEX, '').trim();
+
+    return {
+      text: `### Resumen de Minuta — ${targetFile.path}\n\n${cleanContent}`,
+      found: true
+    };
+  }
+
+  private async searchTranscripts(query: string, clientFilter?: string): Promise<{ text: string; matchesCount: number }> {
+    const rawQuery = query.toLowerCase().trim();
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const transcripts = markdownFiles.filter(f => {
+      const isTranscript = f.name.toLowerCase() === 'transcripcion.md' || f.basename.toLowerCase().includes('transcripci');
+      if (!isTranscript) return false;
+      if (clientFilter) {
+        return f.path.toLowerCase().includes(clientFilter.toLowerCase().trim());
+      }
+      return true;
+    });
+
+    if (transcripts.length === 0) {
+      return { text: `No se encontraron archivos de transcripción para buscar.`, matchesCount: 0 };
+    }
+
+    const results: { path: string; snippets: string[] }[] = [];
+    let totalMatches = 0;
+
+    for (const f of transcripts) {
+      try {
+        const content = await this.app.vault.read(f);
+        const lower = content.toLowerCase();
+        let pos = 0;
+        const snippets: string[] = [];
+
+        while ((pos = lower.indexOf(rawQuery, pos)) !== -1) {
+          totalMatches++;
+          const start = Math.max(0, pos - 100);
+          const end = Math.min(content.length, pos + rawQuery.length + 100);
+          const snippet = content.substring(start, end).replace(/[\r\n]+/g, ' ');
+          snippets.push(`"...${snippet}..."`);
+          pos += rawQuery.length + 50;
+          if (snippets.length >= 3) break;
+        }
+
+        if (snippets.length > 0) {
+          results.push({ path: f.path, snippets });
+          if (results.length >= 10) break;
+        }
+      } catch (e) {}
+    }
+
+    if (results.length === 0) {
+      return { text: `No se encontraron menciones de '${query}' en las transcripciones analizadas.`, matchesCount: 0 };
+    }
+
+    const output = results.map(r => `#### 📄 ${r.path}\n` + r.snippets.map(s => `- ${s}`).join('\n')).join('\n\n');
+    return {
+      text: `### Coincidencias en Transcripciones para '${query}':\n\n${output}`,
+      matchesCount: totalMatches
+    };
   }
 
   /**

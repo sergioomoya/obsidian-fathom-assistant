@@ -22284,9 +22284,10 @@ var GoogleGenAI2 = class {
 
 // agent/tools.ts
 var agentTools = [
+  // ─── LECTURA Y CONTEXTO DE OBSIDIAN ───
   {
     name: "read_current_note",
-    description: "Lee el contenido de la nota que est\xE1 abierta actualmente en Obsidian para que el agente sepa qu\xE9 est\xE1 leyendo el usuario."
+    description: "Lee el contenido de la nota que est\xE1 abierta actualmente en Obsidian para que el asistente sepa qu\xE9 est\xE1 leyendo el usuario."
   },
   {
     name: "read_vault_note",
@@ -22321,14 +22322,142 @@ var agentTools = [
       required: ["file_path"]
     }
   },
+  // ─── GESTIÓN DE PLANES DE ACCIÓN (PDA) Y ACUERDOS ───
   {
-    name: "request_user_permission",
-    description: "Solicita permiso expl\xEDcito al usuario en el chat antes de ejecutar una acci\xF3n sensible, destructiva o de alto impacto (ej: modificar bases de datos SQL, sobreescribir archivos cr\xEDticos o alterar configuraciones).",
+    name: "get_client_pda",
+    description: "Consulta las tareas y acuerdos registrados en el Plan de Acci\xF3n (PDA) de un cliente con filtros por estado o responsable.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        action_title: { type: Type.STRING, description: "T\xEDtulo claro de la acci\xF3n para la que se pide permiso (ej: Ejecutar UPDATE en base de datos BASOR)" },
-        action_details: { type: Type.STRING, description: "Detalle exacto del comando, query o cambio que se va a realizar" },
+        client: { type: Type.STRING, description: "Nombre del cliente (ej: CARAMELOS CERDAN, BASOR)" },
+        status: { type: Type.STRING, description: "Filtro opcional de estado: pending (pendientes), done (completadas), all (todas)" },
+        assignee: { type: Type.STRING, description: "Nombre opcional del responsable para filtrar sus tareas" }
+      },
+      required: ["client"]
+    }
+  },
+  {
+    name: "add_pda_action",
+    description: "A\xF1ade una nueva tarea o acuerdo al Plan de Acci\xF3n (PDA) de un cliente.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        client: { type: Type.STRING, description: "Nombre del cliente" },
+        task: { type: Type.STRING, description: "Descripci\xF3n clara de la tarea o acci\xF3n a realizar" },
+        assignee: { type: Type.STRING, description: "Persona responsable asignada" },
+        priority: { type: Type.STRING, description: "Prioridad: \u{1F7E2} Baja, \u{1F7E1} Media, \u{1F534} Alta" },
+        deadline: { type: Type.STRING, description: "Fecha l\xEDmite estimada (ej: 2026-09-30)" }
+      },
+      required: ["client", "task"]
+    }
+  },
+  {
+    name: "complete_pda_action",
+    description: "Marca como completada una tarea existente en el Plan de Acci\xF3n (PDA) de un cliente.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        client: { type: Type.STRING, description: "Nombre del cliente" },
+        query_or_id: { type: Type.STRING, description: "ID de la tarea o fragmento del texto de la tarea para identificarla" }
+      },
+      required: ["client", "query_or_id"]
+    }
+  },
+  // ─── CONSULTAS DE REUNIONES Y MINUTAS DE FATHOM ───
+  {
+    name: "list_recent_meetings",
+    description: "Lista las reuniones de Fathom archivadas en la b\xF3veda ordenadas por fecha m\xE1s reciente.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        client: { type: Type.STRING, description: "Nombre opcional del cliente para ver solo sus reuniones" },
+        limit: { type: Type.NUMBER, description: "N\xFAmero m\xE1ximo de reuniones a listar (por defecto 5)" }
+      }
+    }
+  },
+  {
+    name: "get_meeting_summary",
+    description: "Obtiene el resumen ejecutivo, acuerdos y temas clave de una reuni\xF3n espec\xEDfica o de la \xFAltima reuni\xF3n de un cliente.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        client: { type: Type.STRING, description: "Nombre del cliente" },
+        meeting_id_or_date: { type: Type.STRING, description: 'ID de la carpeta de la reuni\xF3n, fecha YYYY-MM-DD o "latest" para la m\xE1s reciente' }
+      },
+      required: ["client"]
+    }
+  },
+  {
+    name: "search_meeting_transcripts",
+    description: "Busca menciones o discusiones espec\xEDficas dentro de las transcripciones de reuniones de Fathom.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: { type: Type.STRING, description: "Frase o t\xE9rmino a buscar en las conversaciones" },
+        client: { type: Type.STRING, description: "Nombre opcional del cliente para limitar la b\xFAsqueda" }
+      },
+      required: ["query"]
+    }
+  },
+  // ─── ACCIONES DEL BACKEND DE FATHOM NOTEBOOK ───
+  {
+    name: "trigger_fathom_sync",
+    description: "Lanza el proceso de sincronizaci\xF3n de Fathom Notebook para descargar y procesar las \xFAltimas reuniones grabadas."
+  },
+  {
+    name: "reprocess_meetings",
+    description: "Reprocesa reuniones existentes en Fathom Notebook para regenerar sus minutas o acciones.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        args: { type: Type.STRING, description: "Par\xE1metros para el CLI (ej: --client BASOR o ID de reuni\xF3n)" }
+      }
+    }
+  },
+  {
+    name: "add_domain_mapping",
+    description: "A\xF1ade un mapeo entre un dominio web y el nombre de un cliente (ej: acme.com -> Acme Corp) para asignaci\xF3n autom\xE1tica de reuniones.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        domain: { type: Type.STRING, description: "Dominio web sin @ (ej: mesbook.com)" },
+        company: { type: Type.STRING, description: "Nombre can\xF3nico del cliente" }
+      },
+      required: ["domain", "company"]
+    }
+  },
+  {
+    name: "inject_participants",
+    description: "Fuerza manualmente la lista de participantes en una grabaci\xF3n de Fathom espec\xEDfica.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        recording_id: { type: Type.STRING, description: "ID de la grabaci\xF3n de Fathom" },
+        participants: { type: Type.STRING, description: "Lista de participantes separados por coma (ej: Juan, Maria)" }
+      },
+      required: ["recording_id", "participants"]
+    }
+  },
+  {
+    name: "run_fathom_cli",
+    description: "Ejecuta un comando CLI personalizado en el backend de Fathom Notebook.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        subcommand: { type: Type.STRING, description: "Subcomando y argumentos para el CLI" }
+      },
+      required: ["subcommand"]
+    }
+  },
+  // ─── GOBERNANZA Y PLANIFICACIÓN ───
+  {
+    name: "request_user_permission",
+    description: "Solicita permiso expl\xEDcito al usuario en el chat antes de ejecutar una acci\xF3n sensible o destructiva.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action_title: { type: Type.STRING, description: "T\xEDtulo claro de la acci\xF3n" },
+        action_details: { type: Type.STRING, description: "Detalle exacto del cambio a realizar" },
         danger_level: { type: Type.STRING, description: "Nivel de riesgo: low, medium, high" }
       },
       required: ["action_title", "action_details"]
@@ -22336,7 +22465,7 @@ var agentTools = [
   },
   {
     name: "propose_implementation_plan",
-    description: "Presenta un plan de implementaci\xF3n o checklist interactivo al usuario en el chat para tareas complejas antes de ejecutarlas.",
+    description: "Presenta un plan de implementaci\xF3n o checklist interactivo al usuario en el chat para tareas complejas.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -22349,55 +22478,6 @@ var agentTools = [
         }
       },
       required: ["title", "steps"]
-    }
-  },
-  {
-    name: "add_domain_mapping",
-    description: "A\xF1ade un mapeo local entre un dominio web y el nombre de un cliente (ej: acme.com -> Acme Corp).",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        domain: { type: Type.STRING, description: "Dominio web sin @" },
-        company: { type: Type.STRING, description: "Nombre del cliente/empresa" }
-      },
-      required: ["domain", "company"]
-    }
-  },
-  {
-    name: "inject_participants",
-    description: "Fuerza manualmente la lista de participantes (overrides) en una grabaci\xF3n de Fathom espec\xEDfica.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        recording_id: { type: Type.STRING, description: "ID de la grabaci\xF3n de Fathom" },
-        participants: { type: Type.STRING, description: "Lista de participantes separados por coma (ej: Juan, Maria)" }
-      },
-      required: ["recording_id", "participants"]
-    }
-  },
-  {
-    name: "trigger_fathom_sync",
-    description: "Lanza el proceso de sincronizaci\xF3n de Fathom Notebook para descargar y procesar las \xFAltimas reuniones."
-  },
-  {
-    name: "reprocess_meetings",
-    description: "Reprocesa reuniones existentes en Fathom Notebook para regenerar sus minutas.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        args: { type: Type.STRING, description: "Par\xE1metros opcionales para el reprocesamiento (ej: --all, o un ID espec\xEDfico)" }
-      }
-    }
-  },
-  {
-    name: "run_fathom_cli",
-    description: "Ejecuta un comando CLI en el backend de Fathom Notebook.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        subcommand: { type: Type.STRING, description: "Subcomando y argumentos para el CLI (ej: sync, add-mapping dominio empresa)" }
-      },
-      required: ["subcommand"]
     }
   }
 ];
@@ -22631,12 +22711,179 @@ var import_node_child_process = require("node:child_process");
 var import_node_util = require("node:util");
 var import_node_fs = require("node:fs");
 var import_obsidian = require("obsidian");
+
+// agent/pda-manager.ts
+var SMARTLIST_BLOCK_REGEX = /```smartlist\s*([\s\S]*?)\s*```/;
+var PdaManager = class {
+  constructor(app) {
+    this.app = app;
+  }
+  /**
+   * Localiza el archivo PDA de un cliente en la bóveda de Obsidian.
+   */
+  findPdaFile(client) {
+    const cleanClient = client.trim().toLowerCase();
+    const allFiles = this.app.vault.getMarkdownFiles();
+    let file = allFiles.find((f) => {
+      const base = f.basename.toLowerCase();
+      return base === `pda ${cleanClient}` || base === `pda_${cleanClient}` || base === `pda-${cleanClient}`;
+    });
+    if (file)
+      return file;
+    file = allFiles.find((f) => {
+      const parts = f.path.toLowerCase().split(/[\\/]/);
+      return parts.some((p) => p.includes(cleanClient)) && f.basename.toLowerCase().startsWith("pda");
+    });
+    if (file)
+      return file;
+    return allFiles.find((f) => f.basename.toLowerCase().startsWith("pda") && f.basename.toLowerCase().includes(cleanClient)) || null;
+  }
+  /**
+   * Extrae y parsea el contenido del bloque smartlist del PDA.
+   */
+  async getPdaData(file) {
+    const rawContent = await this.app.vault.read(file);
+    const match2 = rawContent.match(SMARTLIST_BLOCK_REGEX);
+    if (!match2) {
+      return { rawContent, table: null };
+    }
+    try {
+      const table = JSON.parse(match2[1]);
+      return { rawContent, table };
+    } catch (err) {
+      console.error(`[PdaManager] Error parseando JSON de smartlist en ${file.path}:`, err);
+      return { rawContent, table: null };
+    }
+  }
+  /**
+   * Obtiene y filtra las filas del PDA para presentarlas al modelo en texto formateado.
+   */
+  async getClientActions(client, filter) {
+    const file = this.findPdaFile(client);
+    if (!file) {
+      return `No se encontr\xF3 ning\xFAn archivo de Plan de Acci\xF3n (PDA) para el cliente '${client}' en la b\xF3veda.`;
+    }
+    const { table } = await this.getPdaData(file);
+    if (!table || !Array.isArray(table.rows) || table.rows.length === 0) {
+      return `El Plan de Acci\xF3n de '${client}' (${file.path}) no contiene ninguna tarea registrada.`;
+    }
+    let rows = table.rows;
+    if (filter == null ? void 0 : filter.status) {
+      const s = filter.status.toLowerCase();
+      if (s === "pending" || s === "pendiente") {
+        rows = rows.filter((r) => {
+          const st = (r.status || "").toLowerCase();
+          return st.includes("pendiente") || st.includes("en progreso") || !st;
+        });
+      } else if (s === "done" || s === "completado") {
+        rows = rows.filter((r) => (r.status || "").toLowerCase().includes("completado"));
+      } else if (s !== "all" && s !== "todos") {
+        rows = rows.filter((r) => (r.status || "").toLowerCase().includes(s));
+      }
+    }
+    if (filter == null ? void 0 : filter.assignee) {
+      const a = filter.assignee.toLowerCase();
+      rows = rows.filter((r) => {
+        const resp = Array.isArray(r.responsible) ? r.responsible.join(", ") : r.responsible || "";
+        return resp.toLowerCase().includes(a);
+      });
+    }
+    if (rows.length === 0) {
+      return `Plan de Acci\xF3n de '${client}' (${file.path}): No se encontraron tareas que coincidan con los filtros aplicados.`;
+    }
+    const formattedRows = rows.map((r, idx) => {
+      const date = typeof r.session_date === "object" ? r.session_date.text : r.session_date || "Sin fecha";
+      const resp = Array.isArray(r.responsible) ? r.responsible.join(", ") : r.responsible || "Sin asignar";
+      const status = r.status || "Pendiente";
+      const priority = r.priority ? ` | Prioridad: ${r.priority}` : "";
+      const deadline = r.deadline ? ` | L\xEDmite: ${r.deadline}` : "";
+      const comments = r.comments ? ` | Nota: ${r.comments}` : "";
+      return `${idx + 1}. **[${status}]** ${r.task || "Sin descripci\xF3n"}
+   - Responsable: ${resp} | Sesi\xF3n: ${date}${priority}${deadline}${comments}`;
+    }).join("\n\n");
+    return `### Plan de Acci\xF3n \u2014 ${client.toUpperCase()} (${file.path})
+Total tareas mostradas: ${rows.length}
+
+${formattedRows}`;
+  }
+  /**
+   * Añade una nueva acción al PDA de un cliente.
+   */
+  async addAction(client, task, assignee, priority = "\u{1F7E1} Media", deadline) {
+    const file = this.findPdaFile(client);
+    if (!file) {
+      return { success: false, message: `No se encontr\xF3 el archivo PDA para '${client}'.` };
+    }
+    const { rawContent, table } = await this.getPdaData(file);
+    if (!table) {
+      return { success: false, message: `El archivo ${file.path} no contiene un bloque smartlist v\xE1lido.` };
+    }
+    if (!Array.isArray(table.rows)) {
+      table.rows = [];
+    }
+    const todayStr = (/* @__PURE__ */ new Date()).toISOString().substring(0, 10);
+    const newId = `r_act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const newRow = {
+      _id: newId,
+      session_date: {
+        text: todayStr,
+        tooltip: "A\xF1adido desde Fathom Assistant"
+      },
+      task: task.trim(),
+      status: "Pendiente",
+      priority: priority.trim(),
+      responsible: assignee ? assignee.trim() : "Sin asignar",
+      deadline: deadline ? deadline.trim() : ""
+    };
+    table.rows.unshift(newRow);
+    const updatedBlock = "```smartlist\n" + JSON.stringify(table, null, 2) + "\n```";
+    const newContent = rawContent.replace(SMARTLIST_BLOCK_REGEX, () => updatedBlock);
+    await this.app.vault.modify(file, newContent);
+    return {
+      success: true,
+      message: `Tarea a\xF1adida con \xE9xito al PDA de '${client}': "${task}" (Responsable: ${newRow.responsible})`
+    };
+  }
+  /**
+   * Actualiza el estado de una tarea existente en el PDA de un cliente.
+   */
+  async updateActionStatus(client, queryOrId, newStatus = "Completado") {
+    const file = this.findPdaFile(client);
+    if (!file) {
+      return { success: false, message: `No se encontr\xF3 el archivo PDA para '${client}'.` };
+    }
+    const { rawContent, table } = await this.getPdaData(file);
+    if (!table || !Array.isArray(table.rows) || table.rows.length === 0) {
+      return { success: false, message: `No hay tareas en el PDA de '${client}'.` };
+    }
+    const q = queryOrId.toLowerCase().trim();
+    const targetRow = table.rows.find(
+      (r) => r._id && r._id.toLowerCase() === q || r.task && r.task.toLowerCase().includes(q)
+    );
+    if (!targetRow) {
+      return { success: false, message: `No se encontr\xF3 ninguna tarea que coincida con '${queryOrId}' en el PDA de '${client}'.` };
+    }
+    const oldStatus = targetRow.status || "Pendiente";
+    targetRow.status = newStatus;
+    const updatedBlock = "```smartlist\n" + JSON.stringify(table, null, 2) + "\n```";
+    const newContent = rawContent.replace(SMARTLIST_BLOCK_REGEX, () => updatedBlock);
+    await this.app.vault.modify(file, newContent);
+    return {
+      success: true,
+      message: `Tarea actualizada en el PDA de '${client}': de [${oldStatus}] a [${newStatus}] para "${targetRow.task}"`,
+      updatedTask: targetRow.task
+    };
+  }
+};
+
+// agent/executor.ts
 var execAsync = (0, import_node_util.promisify)(import_node_child_process.exec);
 var ToolExecutor = class {
   constructor(app, fathomRepoPath, handlers) {
     this.app = app;
     this.fathomRepoPath = fathomRepoPath;
     this.handlers = handlers;
+    this.pdaManager = new PdaManager(app);
   }
   /**
    * Obtiene los metadatos visuales de la herramienta ANTES de ejecutarla (para pintar la tarjeta en vivo).
@@ -22672,6 +22919,48 @@ var ToolExecutor = class {
         return {
           group: "files",
           displayTitle: `Read ${fileName}`
+        };
+      }
+      case "get_client_pda": {
+        const client = args.client || "Client";
+        return {
+          group: "files",
+          displayTitle: `Read PDA: ${client}`
+        };
+      }
+      case "add_pda_action": {
+        const client = args.client || "Client";
+        return {
+          group: "commands",
+          displayTitle: `Add action to PDA: ${client}`
+        };
+      }
+      case "complete_pda_action": {
+        const client = args.client || "Client";
+        return {
+          group: "commands",
+          displayTitle: `Complete action in PDA: ${client}`
+        };
+      }
+      case "list_recent_meetings": {
+        const client = args.client ? ` (${args.client})` : "";
+        return {
+          group: "files",
+          displayTitle: `List meetings${client}`
+        };
+      }
+      case "get_meeting_summary": {
+        const client = args.client || "Client";
+        return {
+          group: "files",
+          displayTitle: `Summary: ${client} meeting`
+        };
+      }
+      case "search_meeting_transcripts": {
+        const query = args.query || "";
+        return {
+          group: "files",
+          displayTitle: `Search transcripts: "${query}"`
         };
       }
       case "request_user_permission": {
@@ -22858,6 +23147,42 @@ ${content}`, meta };
           meta.resultSummary = "Archivo no encontrado";
           return { textResult: `Error: El archivo '${file_path}' no existe en el sistema de archivos ni en la b\xF3veda de Obsidian.`, meta };
         }
+        case "get_client_pda": {
+          const { client, status, assignee } = args;
+          const result = await this.pdaManager.getClientActions(client, { status, assignee });
+          meta.resultSummary = result.includes("### Plan de Acci\xF3n") ? "PDA consultado" : "Sin tareas";
+          return { textResult: result, meta };
+        }
+        case "add_pda_action": {
+          const { client, task, assignee, priority, deadline } = args;
+          const res = await this.pdaManager.addAction(client, task, assignee, priority, deadline);
+          meta.resultSummary = res.success ? "Acci\xF3n a\xF1adida" : "Error";
+          return { textResult: res.message, meta };
+        }
+        case "complete_pda_action": {
+          const { client, query_or_id } = args;
+          const res = await this.pdaManager.updateActionStatus(client, query_or_id, "Completado");
+          meta.resultSummary = res.success ? "Acci\xF3n completada" : "No encontrada";
+          return { textResult: res.message, meta };
+        }
+        case "list_recent_meetings": {
+          const { client, limit = 5 } = args;
+          const result = await this.listRecentMeetings(client, Number(limit));
+          meta.resultSummary = `${result.count} reuniones`;
+          return { textResult: result.text, meta };
+        }
+        case "get_meeting_summary": {
+          const { client, meeting_id_or_date } = args;
+          const result = await this.getMeetingSummary(client, meeting_id_or_date);
+          meta.resultSummary = result.found ? "Minuta le\xEDda" : "No encontrada";
+          return { textResult: result.text, meta };
+        }
+        case "search_meeting_transcripts": {
+          const { query, client } = args;
+          const result = await this.searchTranscripts(query, client);
+          meta.resultSummary = `${result.matchesCount} menci\xF3n(es)`;
+          return { textResult: result.text, meta };
+        }
         case "request_user_permission": {
           const { action_title, action_details, danger_level = "medium" } = args;
           const permissionKey = `perm_${action_title.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()}`;
@@ -22935,6 +23260,127 @@ ${content}`, meta };
       meta.resultSummary = `Error: ${error.message}`;
       return { textResult: `Excepci\xF3n ejecutando herramienta ${name}: ${error.message}`, meta };
     }
+  }
+  // ─── MÉTODOS DE APOYO PARA REUNIONES Y TRANSCRIPCIONES ───
+  async listRecentMeetings(clientFilter, limit = 5) {
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const minutasFiles = markdownFiles.filter((f) => f.name.toLowerCase() === "minutas.md" || f.name.toLowerCase().endsWith("- minutas.md"));
+    const meetings = [];
+    for (const f of minutasFiles) {
+      const parts = f.path.split(/[\\/]/);
+      if (parts.length >= 3) {
+        const clientName = parts[parts.length - 3];
+        const meetingFolder = parts[parts.length - 2];
+        const dateMatch = meetingFolder.match(/^(\d{4}-\d{2}-\d{2})/);
+        const date = dateMatch ? dateMatch[1] : "";
+        if (clientFilter) {
+          const cleanFilter = clientFilter.toLowerCase().trim();
+          if (!clientName.toLowerCase().includes(cleanFilter))
+            continue;
+        }
+        meetings.push({
+          client: clientName,
+          meetingName: meetingFolder,
+          path: f.path,
+          date
+        });
+      }
+    }
+    meetings.sort((a, b) => b.date.localeCompare(a.date));
+    const sliced = meetings.slice(0, Math.max(1, limit));
+    if (sliced.length === 0) {
+      return {
+        text: clientFilter ? `No se encontraron reuniones de Fathom archivadas para el cliente '${clientFilter}'.` : "No se encontraron reuniones de Fathom en la b\xF3veda.",
+        count: 0
+      };
+    }
+    const listText = sliced.map((m, i) => `${i + 1}. **${m.date || "Sin fecha"}** \u2014 *${m.client}*: ${m.meetingName} (\`${m.path}\`)`).join("\n");
+    return {
+      text: `### Reuniones recientes de Fathom (${sliced.length} mostradas):
+
+${listText}`,
+      count: sliced.length
+    };
+  }
+  async getMeetingSummary(client, meetingIdOrDate) {
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const cleanClient = client.toLowerCase().trim();
+    const clientMinutas = markdownFiles.filter((f) => {
+      const p = f.path.toLowerCase();
+      return p.includes(cleanClient) && (f.name.toLowerCase() === "minutas.md" || f.basename.toLowerCase().includes("minutas"));
+    });
+    if (clientMinutas.length === 0) {
+      return { text: `No se encontraron minutas para el cliente '${client}'.`, found: false };
+    }
+    clientMinutas.sort((a, b) => b.path.localeCompare(a.path));
+    let targetFile = clientMinutas[0];
+    if (meetingIdOrDate && meetingIdOrDate.toLowerCase() !== "latest" && meetingIdOrDate.toLowerCase() !== "ultima") {
+      const targetQuery = meetingIdOrDate.toLowerCase().trim();
+      const match2 = clientMinutas.find((f) => f.path.toLowerCase().includes(targetQuery));
+      if (match2)
+        targetFile = match2;
+    }
+    const rawContent = await this.app.vault.read(targetFile);
+    const cleanContent = rawContent.replace(SMARTLIST_BLOCK_REGEX, "").trim();
+    return {
+      text: `### Resumen de Minuta \u2014 ${targetFile.path}
+
+${cleanContent}`,
+      found: true
+    };
+  }
+  async searchTranscripts(query, clientFilter) {
+    const rawQuery = query.toLowerCase().trim();
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const transcripts = markdownFiles.filter((f) => {
+      const isTranscript = f.name.toLowerCase() === "transcripcion.md" || f.basename.toLowerCase().includes("transcripci");
+      if (!isTranscript)
+        return false;
+      if (clientFilter) {
+        return f.path.toLowerCase().includes(clientFilter.toLowerCase().trim());
+      }
+      return true;
+    });
+    if (transcripts.length === 0) {
+      return { text: `No se encontraron archivos de transcripci\xF3n para buscar.`, matchesCount: 0 };
+    }
+    const results = [];
+    let totalMatches = 0;
+    for (const f of transcripts) {
+      try {
+        const content = await this.app.vault.read(f);
+        const lower = content.toLowerCase();
+        let pos = 0;
+        const snippets = [];
+        while ((pos = lower.indexOf(rawQuery, pos)) !== -1) {
+          totalMatches++;
+          const start = Math.max(0, pos - 100);
+          const end = Math.min(content.length, pos + rawQuery.length + 100);
+          const snippet = content.substring(start, end).replace(/[\r\n]+/g, " ");
+          snippets.push(`"...${snippet}..."`);
+          pos += rawQuery.length + 50;
+          if (snippets.length >= 3)
+            break;
+        }
+        if (snippets.length > 0) {
+          results.push({ path: f.path, snippets });
+          if (results.length >= 10)
+            break;
+        }
+      } catch (e) {
+      }
+    }
+    if (results.length === 0) {
+      return { text: `No se encontraron menciones de '${query}' en las transcripciones analizadas.`, matchesCount: 0 };
+    }
+    const output = results.map((r) => `#### \u{1F4C4} ${r.path}
+` + r.snippets.map((s) => `- ${s}`).join("\n")).join("\n\n");
+    return {
+      text: `### Coincidencias en Transcripciones para '${query}':
+
+${output}`,
+      matchesCount: totalMatches
+    };
   }
   /**
    * Envía un comando a la terminal del sistema host, ejecutándolo en el directorio del backend.
