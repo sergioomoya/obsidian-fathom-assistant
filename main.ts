@@ -11,6 +11,9 @@ interface FathomAssistantSettings {
   chatsFolder: string;
   alwaysAllowedPermissions: string[];
   autoInjectClientContext: boolean;
+  enableTools: boolean;
+  enableAgenticIterations: boolean;
+  maxAgenticIterations: number;
 }
 
 const DEFAULT_SETTINGS: FathomAssistantSettings = {
@@ -19,7 +22,10 @@ const DEFAULT_SETTINGS: FathomAssistantSettings = {
   geminiModel: 'gemini-3.7-flash',
   chatsFolder: 'Fathom Chats',
   alwaysAllowedPermissions: [],
-  autoInjectClientContext: true
+  autoInjectClientContext: true,
+  enableTools: true,
+  enableAgenticIterations: false,
+  maxAgenticIterations: 10
 };
 
 export const VIEW_TYPE_FATHOM_CHAT = "fathom-chat-view";
@@ -520,7 +526,10 @@ export class FathomChatView extends ItemView {
             this.chatHistory.slice(0, -1), 
             feedback, 
             this.currentAbortController.signal,
-            vaultBaseContext
+            vaultBaseContext,
+            this.plugin.settings.enableTools ?? true,
+            this.plugin.settings.enableAgenticIterations ?? false,
+            this.plugin.settings.maxAgenticIterations ?? 10
           ),
           abortPromise
         ]);
@@ -1013,6 +1022,47 @@ class FathomAssistantSettingTab extends PluginSettingTab {
           this.plugin.settings.autoInjectClientContext = value;
           await this.plugin.saveSettings();
         }));
+
+    // ─── SECCIÓN: CONTROL DE CONSUMO DE API Y MODO AGÉNTICO ───
+    containerEl.createEl('h3', { text: '⚡ Control de Consumo de API y Modo Agéntico' });
+
+    new Setting(containerEl)
+      .setName('Habilitar herramientas (Function Calling)')
+      .setDesc('Permite al asistente interactuar con notas de Obsidian, archivos locales y servidores MCP. Si se desactiva, responderá en modo chat puro sin consumir tokens en herramientas.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.enableTools ?? true)
+        .onChange(async (value) => {
+          this.plugin.settings.enableTools = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+
+    if (this.plugin.settings.enableTools ?? true) {
+      new Setting(containerEl)
+        .setName('Habilitar iteraciones agénticas multi-paso')
+        .setDesc('Permite al asistente encadenar múltiples búsquedas y llamadas a herramientas en bucle antes de responder. Desactívalo para usar tu API privada sin sobrecostes (solo realizará como máximo 1 consulta puntual si es imprescindible).')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.enableAgenticIterations ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.enableAgenticIterations = value;
+            await this.plugin.saveSettings();
+            this.display();
+          }));
+
+      if (this.plugin.settings.enableAgenticIterations) {
+        new Setting(containerEl)
+          .setName('Límite máximo de iteraciones')
+          .setDesc('Tope de pasos sucesivos permitidos al agente cuando las iteraciones están activas (2 a 25).')
+          .addSlider(slider => slider
+            .setLimits(2, 25, 1)
+            .setValue(this.plugin.settings.maxAgenticIterations || 10)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              this.plugin.settings.maxAgenticIterations = value;
+              await this.plugin.saveSettings();
+            }));
+      }
+    }
 
     // ─── SECCIÓN: GOBERNANZA Y PERMISOS AUTORIZADOS ───
     containerEl.createEl('h3', { text: '🔒 Gobernanza y Memoria de Permisos' });

@@ -22414,7 +22414,7 @@ var GeminiService = class {
   /**
    * Envía un mensaje al modelo con streaming en vivo, herramientas locales y soporte para servidores MCP.
    */
-  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = [], feedback, signal, vaultBaseContext = "") {
+  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = [], feedback, signal, vaultBaseContext = "", enableTools = true, enableAgenticIterations = false, maxAgenticIterations = 10) {
     try {
       let sanitizedHistory = [];
       for (const msg of history) {
@@ -22437,17 +22437,26 @@ var GeminiService = class {
           parts: [{ text: "Entendido, contin\xFAa." }]
         });
       }
-      const allTools = [...agentTools];
-      if (this.mcpManager) {
-        const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
-        allTools.push(...mcpTools);
+      const allTools = [];
+      if (enableTools) {
+        allTools.push(...agentTools);
+        if (this.mcpManager) {
+          const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
+          allTools.push(...mcpTools);
+        }
+      }
+      let consumptionNotice = "";
+      if (!enableTools) {
+        consumptionNotice = "\nMODO AHORRO DE TOKENS: Las herramientas est\xE1n desactivadas. Responde directamente con el contexto que dispones sin llamar a funciones.";
+      } else if (!enableAgenticIterations) {
+        consumptionNotice = "\nMODO AHORRO DE TOKENS: Las iteraciones continuas est\xE1n desactivadas. Tienes como m\xE1ximo 1 ronda de herramientas si es estrictamente necesario. Responde directamente tras ello y no inicies cadenas sucesivas de investigaci\xF3n.";
       }
       const systemInstruction = `Eres Fathom Assistant, el agente inteligente de \xE9lite integrado en Obsidian.
 
 DIRECTIVAS PRINCIPALES:
 1. JERARQU\xCDA DE CONTEXTO:
    - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas espec\xEDficas, tu m\xE1xima prioridad y enfoque de an\xE1lisis debe centrarse en ese material.
-   - Autonom\xEDa y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonom\xEDa para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar informaci\xF3n o responder exhaustivamente.
+   - Autonom\xEDa y Acceso Global: El foco en un documento no te limita. Tienes libertad para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar informaci\xF3n o responder exhaustivamente.${consumptionNotice}
 2. GOBERNANZA Y PERMISOS INTERACTIVOS:
    - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmaci\xF3n en el chat.
    - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
@@ -22457,12 +22466,15 @@ DIRECTIVAS PRINCIPALES:
 
 CONTEXTO BASE DE LA B\xD3VEDA (CLIENTES Y CONTACTOS):
 ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s de herramientas."}`;
+      const config = {
+        systemInstruction
+      };
+      if (enableTools && allTools.length > 0) {
+        config.tools = [{ functionDeclarations: allTools }];
+      }
       const createParams = {
         model: modelName,
-        config: {
-          systemInstruction,
-          tools: [{ functionDeclarations: allTools }]
-        }
+        config
       };
       if (sanitizedHistory.length > 0) {
         createParams.history = sanitizedHistory;
@@ -22471,7 +22483,25 @@ ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s
       const payload = Array.isArray(promptParts) && promptParts.length === 1 && typeof promptParts[0] === "string" ? promptParts[0] : promptParts;
       let fullAccumulatedText = "";
       let currentPayload = { message: payload };
-      let maxIterations = 25;
+      let maxIterations = 0;
+      if (enableTools) {
+        maxIterations = enableAgenticIterations ? Math.max(2, maxAgenticIterations || 10) : 1;
+      }
+      if (maxIterations === 0) {
+        const streamResponse = await chat.sendMessageStream(currentPayload);
+        for await (const chunk of streamResponse) {
+          if (signal == null ? void 0 : signal.aborted)
+            throw new Error("AbortError");
+          const chunkText = chunk.text || "";
+          if (chunkText) {
+            fullAccumulatedText += chunkText;
+            if (feedback == null ? void 0 : feedback.onToken) {
+              feedback.onToken(chunkText);
+            }
+          }
+        }
+        return fullAccumulatedText || "No se pudo obtener una respuesta del modelo.";
+      }
       while (maxIterations > 0) {
         if (signal == null ? void 0 : signal.aborted) {
           throw new Error("AbortError");
@@ -23223,7 +23253,10 @@ var DEFAULT_SETTINGS = {
   geminiModel: "gemini-3.7-flash",
   chatsFolder: "Fathom Chats",
   alwaysAllowedPermissions: [],
-  autoInjectClientContext: true
+  autoInjectClientContext: true,
+  enableTools: true,
+  enableAgenticIterations: false,
+  maxAgenticIterations: 10
 };
 var VIEW_TYPE_FATHOM_CHAT = "fathom-chat-view";
 var BotActivityTracker = class {
@@ -23459,6 +23492,7 @@ var FathomChatView = class extends import_obsidian2.ItemView {
     });
     this.inputEl.addEventListener("input", () => this.updateSendBtnState());
     const submitPrompt = async () => {
+      var _a2, _b, _c;
       if (this.isGenerating)
         return;
       const text = this.inputEl.value.trim();
@@ -23626,7 +23660,10 @@ ${finalPrompt}`;
             this.chatHistory.slice(0, -1),
             feedback,
             this.currentAbortController.signal,
-            vaultBaseContext
+            vaultBaseContext,
+            (_a2 = this.plugin.settings.enableTools) != null ? _a2 : true,
+            (_b = this.plugin.settings.enableAgenticIterations) != null ? _b : false,
+            (_c = this.plugin.settings.maxAgenticIterations) != null ? _c : 10
           ),
           abortPromise
         ]);
@@ -24005,6 +24042,7 @@ var FathomAssistantSettingTab = class extends import_obsidian2.PluginSettingTab 
     this.plugin = plugin;
   }
   display() {
+    var _a2;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Configuraci\xF3n de Fathom Assistant" });
@@ -24025,12 +24063,37 @@ var FathomAssistantSettingTab = class extends import_obsidian2.PluginSettingTab 
       await this.plugin.saveSettings();
     }));
     new import_obsidian2.Setting(containerEl).setName("Contexto de Clientes y Contactos por defecto").setDesc("Inyectar autom\xE1ticamente el directorio contacts.md y la lista de clientes en las instrucciones base.").addToggle((toggle) => {
-      var _a2;
-      return toggle.setValue((_a2 = this.plugin.settings.autoInjectClientContext) != null ? _a2 : true).onChange(async (value) => {
+      var _a3;
+      return toggle.setValue((_a3 = this.plugin.settings.autoInjectClientContext) != null ? _a3 : true).onChange(async (value) => {
         this.plugin.settings.autoInjectClientContext = value;
         await this.plugin.saveSettings();
       });
     });
+    containerEl.createEl("h3", { text: "\u26A1 Control de Consumo de API y Modo Ag\xE9ntico" });
+    new import_obsidian2.Setting(containerEl).setName("Habilitar herramientas (Function Calling)").setDesc("Permite al asistente interactuar con notas de Obsidian, archivos locales y servidores MCP. Si se desactiva, responder\xE1 en modo chat puro sin consumir tokens en herramientas.").addToggle((toggle) => {
+      var _a3;
+      return toggle.setValue((_a3 = this.plugin.settings.enableTools) != null ? _a3 : true).onChange(async (value) => {
+        this.plugin.settings.enableTools = value;
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
+    if ((_a2 = this.plugin.settings.enableTools) != null ? _a2 : true) {
+      new import_obsidian2.Setting(containerEl).setName("Habilitar iteraciones ag\xE9nticas multi-paso").setDesc("Permite al asistente encadenar m\xFAltiples b\xFAsquedas y llamadas a herramientas en bucle antes de responder. Desact\xEDvalo para usar tu API privada sin sobrecostes (solo realizar\xE1 como m\xE1ximo 1 consulta puntual si es imprescindible).").addToggle((toggle) => {
+        var _a3;
+        return toggle.setValue((_a3 = this.plugin.settings.enableAgenticIterations) != null ? _a3 : false).onChange(async (value) => {
+          this.plugin.settings.enableAgenticIterations = value;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+      if (this.plugin.settings.enableAgenticIterations) {
+        new import_obsidian2.Setting(containerEl).setName("L\xEDmite m\xE1ximo de iteraciones").setDesc("Tope de pasos sucesivos permitidos al agente cuando las iteraciones est\xE1n activas (2 a 25).").addSlider((slider) => slider.setLimits(2, 25, 1).setValue(this.plugin.settings.maxAgenticIterations || 10).setDynamicTooltip().onChange(async (value) => {
+          this.plugin.settings.maxAgenticIterations = value;
+          await this.plugin.saveSettings();
+        }));
+      }
+    }
     containerEl.createEl("h3", { text: "\u{1F512} Gobernanza y Memoria de Permisos" });
     const allowed = this.plugin.settings.alwaysAllowedPermissions || [];
     if (allowed.length === 0) {

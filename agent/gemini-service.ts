@@ -38,7 +38,10 @@ export class GeminiService {
     history: {role: string, text: string}[] = [],
     feedback?: AgentUIFeedback,
     signal?: AbortSignal,
-    vaultBaseContext: string = ''
+    vaultBaseContext: string = '',
+    enableTools: boolean = true,
+    enableAgenticIterations: boolean = false,
+    maxAgenticIterations: number = 10
   ): Promise<string> {
     try {
       let sanitizedHistory: any[] = [];
@@ -49,12 +52,12 @@ export class GeminiService {
         const lastRole = sanitizedHistory.length > 0 ? sanitizedHistory[sanitizedHistory.length - 1].role : null;
         
         if (currentRole === lastRole) {
-           sanitizedHistory[sanitizedHistory.length - 1].parts[0].text += "\n\n" + (msg.text || ' ');
+            sanitizedHistory[sanitizedHistory.length - 1].parts[0].text += "\n\n" + (msg.text || ' ');
         } else {
-           sanitizedHistory.push({
-             role: currentRole,
-             parts: [{ text: msg.text || ' ' }]
-           });
+            sanitizedHistory.push({
+              role: currentRole,
+              parts: [{ text: msg.text || ' ' }]
+            });
         }
       }
       
@@ -66,11 +69,21 @@ export class GeminiService {
          });
       }
 
-      // 1. Recopilar herramientas locales y herramientas MCP
-      const allTools: FunctionDeclaration[] = [...agentTools];
-      if (this.mcpManager) {
-        const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
-        allTools.push(...mcpTools);
+      // 1. Recopilar herramientas locales y herramientas MCP (si están activadas)
+      const allTools: FunctionDeclaration[] = [];
+      if (enableTools) {
+        allTools.push(...agentTools);
+        if (this.mcpManager) {
+          const mcpTools = this.mcpManager.getGeminiFunctionDeclarations();
+          allTools.push(...mcpTools);
+        }
+      }
+
+      let consumptionNotice = '';
+      if (!enableTools) {
+        consumptionNotice = '\nMODO AHORRO DE TOKENS: Las herramientas están desactivadas. Responde directamente con el contexto que dispones sin llamar a funciones.';
+      } else if (!enableAgenticIterations) {
+        consumptionNotice = '\nMODO AHORRO DE TOKENS: Las iteraciones continuas están desactivadas. Tienes como máximo 1 ronda de herramientas si es estrictamente necesario. Responde directamente tras ello y no inicies cadenas sucesivas de investigación.';
       }
 
       // 2. Construir System Instructions con jerarquía de contexto y gobernanza
@@ -79,7 +92,7 @@ export class GeminiService {
 DIRECTIVAS PRINCIPALES:
 1. JERARQUÍA DE CONTEXTO:
    - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas específicas, tu máxima prioridad y enfoque de análisis debe centrarse en ese material.
-   - Autonomía y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonomía para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar información o responder exhaustivamente.
+   - Autonomía y Acceso Global: El foco en un documento no te limita. Tienes libertad para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar información o responder exhaustivamente.${consumptionNotice}
 2. GOBERNANZA Y PERMISOS INTERACTIVOS:
    - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmación en el chat.
    - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
@@ -90,12 +103,17 @@ DIRECTIVAS PRINCIPALES:
 CONTEXTO BASE DE LA BÓVEDA (CLIENTES Y CONTACTOS):
 ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través de herramientas.'}`;
 
+      const config: any = {
+        systemInstruction
+      };
+
+      if (enableTools && allTools.length > 0) {
+        config.tools = [{ functionDeclarations: allTools }];
+      }
+
       const createParams: any = {
         model: modelName,
-        config: {
-          systemInstruction,
-          tools: [{ functionDeclarations: allTools }]
-        }
+        config
       };
 
       if (sanitizedHistory.length > 0) {
@@ -110,7 +128,28 @@ ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través d
         
       let fullAccumulatedText = '';
       let currentPayload: any = { message: payload };
-      let maxIterations = 25;
+      
+      // Control estricto de iteraciones para proteger la factura de la API
+      let maxIterations = 0;
+      if (enableTools) {
+        maxIterations = enableAgenticIterations ? Math.max(2, maxAgenticIterations || 10) : 1;
+      }
+
+      // Si las herramientas están desactivadas, realizar streaming directo de 1 solo turno
+      if (maxIterations === 0) {
+        const streamResponse = await chat.sendMessageStream(currentPayload);
+        for await (const chunk of streamResponse) {
+          if (signal?.aborted) throw new Error('AbortError');
+          const chunkText = chunk.text || '';
+          if (chunkText) {
+            fullAccumulatedText += chunkText;
+            if (feedback?.onToken) {
+              feedback.onToken(chunkText);
+            }
+          }
+        }
+        return fullAccumulatedText || 'No se pudo obtener una respuesta del modelo.';
+      }
 
       while (maxIterations > 0) {
         if (signal?.aborted) {
