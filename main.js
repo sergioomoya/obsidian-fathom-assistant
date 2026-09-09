@@ -22978,6 +22978,9 @@ var MCPServerSession = class {
     this.buffer = "";
     this.tools = [];
   }
+  isRunning() {
+    return this.process !== null && !this.process.killed;
+  }
   async start() {
     var _a2, _b;
     if (this.process)
@@ -23118,6 +23121,66 @@ var MCPManager = class {
       }
     } catch (err) {
       console.error("[MCP Manager] Error leyendo mcp-config.json:", err);
+    }
+  }
+  /**
+   * Obtiene la lista completa de servidores MCP definidos en la configuración y su estado actual.
+   */
+  getServerList() {
+    var _a2;
+    if (!(0, import_node_fs2.existsSync)(this.configPath))
+      return [];
+    try {
+      const raw = (0, import_node_fs2.readFileSync)(this.configPath, "utf-8");
+      const config = JSON.parse(raw);
+      const list = [];
+      for (const [name, serverCfg] of Object.entries(config.mcpServers || {})) {
+        const session = this.sessions.get(name);
+        list.push({
+          name,
+          command: serverCfg.command,
+          args: serverCfg.args || [],
+          disabled: !!serverCfg.disabled,
+          isRunning: session ? session.isRunning() : false,
+          toolCount: ((_a2 = session == null ? void 0 : session.tools) == null ? void 0 : _a2.length) || 0
+        });
+      }
+      return list;
+    } catch (e) {
+      console.error("[MCP Manager] Error leyendo servidores:", e);
+      return [];
+    }
+  }
+  /**
+   * Activa o desactiva un servidor MCP persistiendo el cambio en mcp-config.json y arrancando o parando el proceso.
+   */
+  async setServerEnabled(name, enable) {
+    if (!(0, import_node_fs2.existsSync)(this.configPath))
+      return;
+    try {
+      const raw = (0, import_node_fs2.readFileSync)(this.configPath, "utf-8");
+      const config = JSON.parse(raw);
+      if (!config.mcpServers || !config.mcpServers[name])
+        return;
+      config.mcpServers[name].disabled = !enable;
+      (0, import_node_fs2.writeFileSync)(this.configPath, JSON.stringify(config, null, 2), "utf-8");
+      if (enable) {
+        if (this.sessions.has(name)) {
+          this.sessions.get(name).stop();
+          this.sessions.delete(name);
+        }
+        const session = new MCPServerSession(name, config.mcpServers[name]);
+        this.sessions.set(name, session);
+        await session.start();
+      } else {
+        if (this.sessions.has(name)) {
+          this.sessions.get(name).stop();
+          this.sessions.delete(name);
+        }
+      }
+    } catch (e) {
+      console.error(`[MCP Manager] Error cambiando estado del servidor '${name}':`, e);
+      throw e;
     }
   }
   /**
@@ -24042,7 +24105,7 @@ var FathomAssistantSettingTab = class extends import_obsidian2.PluginSettingTab 
     this.plugin = plugin;
   }
   display() {
-    var _a2;
+    var _a2, _b;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Configuraci\xF3n de Fathom Assistant" });
@@ -24121,9 +24184,35 @@ var FathomAssistantSettingTab = class extends import_obsidian2.PluginSettingTab 
     }
     containerEl.createEl("h3", { text: "\u{1F50C} Servidores MCP (Model Context Protocol)" });
     containerEl.createEl("p", {
-      text: "Los servidores MCP se gestionan de forma independiente en el archivo mcp-config.json del plugin (soporta notebooklm, sqlserver, etc.).",
+      text: "Servidores MCP configurados de forma aislada en mcp-config.json. Puedes activar o desactivar cada servidor individualmente:",
       cls: "setting-item-description"
     });
+    const mcpServers = ((_b = this.plugin.mcpManager) == null ? void 0 : _b.getServerList()) || [];
+    if (mcpServers.length === 0) {
+      containerEl.createEl("p", {
+        text: "No se encontraron servidores MCP configurados en mcp-config.json.",
+        cls: "setting-item-description"
+      });
+    } else {
+      for (const server of mcpServers) {
+        const isEnabled = !server.disabled;
+        let statusBadge = "\u26AA Desactivado";
+        if (isEnabled) {
+          statusBadge = server.isRunning ? `\u{1F7E2} Activo (${server.toolCount} herramienta${server.toolCount === 1 ? "" : "s"})` : "\u{1F7E1} Conectando / En espera";
+        }
+        const argsStr = server.args && server.args.length > 0 ? ` ${server.args.slice(0, 2).join(" ")}...` : "";
+        const cmdDesc = `${statusBadge} \u2014 Comando: ${server.command}${argsStr}`;
+        new import_obsidian2.Setting(containerEl).setName(server.name).setDesc(cmdDesc).addToggle((toggle) => toggle.setValue(isEnabled).onChange(async (value) => {
+          toggle.setDisabled(true);
+          try {
+            await this.plugin.mcpManager.setServerEnabled(server.name, value);
+          } catch (err) {
+            console.error(`Error cambiando estado de MCP ${server.name}:`, err);
+          }
+          setTimeout(() => this.display(), 800);
+        }));
+      }
+    }
   }
 };
 /*! Bundled license information:

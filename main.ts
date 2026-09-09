@@ -1107,8 +1107,44 @@ class FathomAssistantSettingTab extends PluginSettingTab {
     // ─── SECCIÓN: SERVIDORES MCP ───
     containerEl.createEl('h3', { text: '🔌 Servidores MCP (Model Context Protocol)' });
     containerEl.createEl('p', {
-      text: 'Los servidores MCP se gestionan de forma independiente en el archivo mcp-config.json del plugin (soporta notebooklm, sqlserver, etc.).',
+      text: 'Servidores MCP configurados de forma aislada en mcp-config.json. Puedes activar o desactivar cada servidor individualmente:',
       cls: 'setting-item-description'
     });
+
+    const mcpServers = this.plugin.mcpManager?.getServerList() || [];
+    if (mcpServers.length === 0) {
+      containerEl.createEl('p', {
+        text: 'No se encontraron servidores MCP configurados en mcp-config.json.',
+        cls: 'setting-item-description'
+      });
+    } else {
+      for (const server of mcpServers) {
+        const isEnabled = !server.disabled;
+        let statusBadge = '⚪ Desactivado';
+        if (isEnabled) {
+          statusBadge = server.isRunning 
+            ? `🟢 Activo (${server.toolCount} herramienta${server.toolCount === 1 ? '' : 's'})` 
+            : '🟡 Conectando / En espera';
+        }
+
+        const argsStr = server.args && server.args.length > 0 ? ` ${server.args.slice(0, 2).join(' ')}...` : '';
+        const cmdDesc = `${statusBadge} — Comando: ${server.command}${argsStr}`;
+
+        new Setting(containerEl)
+          .setName(server.name)
+          .setDesc(cmdDesc)
+          .addToggle(toggle => toggle
+            .setValue(isEnabled)
+            .onChange(async (value) => {
+              toggle.setDisabled(true);
+              try {
+                await this.plugin.mcpManager.setServerEnabled(server.name, value);
+              } catch (err) {
+                console.error(`Error cambiando estado de MCP ${server.name}:`, err);
+              }
+              setTimeout(() => this.display(), 800);
+            }));
+      }
+    }
   }
 }

@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { FunctionDeclaration, Type } from '@google/genai';
 
@@ -35,6 +35,10 @@ class MCPServerSession {
   public tools: MCPTool[] = [];
 
   constructor(public readonly name: string, private config: MCPServerConfig) {}
+
+  isRunning(): boolean {
+    return this.process !== null && !this.process.killed;
+  }
 
   async start(): Promise<void> {
     if (this.process) return;
@@ -205,6 +209,67 @@ export class MCPManager {
       }
     } catch (err) {
       console.error('[MCP Manager] Error leyendo mcp-config.json:', err);
+    }
+  }
+
+  /**
+   * Obtiene la lista completa de servidores MCP definidos en la configuración y su estado actual.
+   */
+  getServerList(): { name: string; command: string; args: string[]; disabled: boolean; isRunning: boolean; toolCount: number }[] {
+    if (!existsSync(this.configPath)) return [];
+    try {
+      const raw = readFileSync(this.configPath, 'utf-8');
+      const config: MCPConfigFile = JSON.parse(raw);
+      const list: { name: string; command: string; args: string[]; disabled: boolean; isRunning: boolean; toolCount: number }[] = [];
+      
+      for (const [name, serverCfg] of Object.entries(config.mcpServers || {})) {
+        const session = this.sessions.get(name);
+        list.push({
+          name,
+          command: serverCfg.command,
+          args: serverCfg.args || [],
+          disabled: !!serverCfg.disabled,
+          isRunning: session ? session.isRunning() : false,
+          toolCount: session?.tools?.length || 0
+        });
+      }
+      return list;
+    } catch (e) {
+      console.error('[MCP Manager] Error leyendo servidores:', e);
+      return [];
+    }
+  }
+
+  /**
+   * Activa o desactiva un servidor MCP persistiendo el cambio en mcp-config.json y arrancando o parando el proceso.
+   */
+  async setServerEnabled(name: string, enable: boolean): Promise<void> {
+    if (!existsSync(this.configPath)) return;
+    try {
+      const raw = readFileSync(this.configPath, 'utf-8');
+      const config: MCPConfigFile = JSON.parse(raw);
+      if (!config.mcpServers || !config.mcpServers[name]) return;
+
+      config.mcpServers[name].disabled = !enable;
+      writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
+
+      if (enable) {
+        if (this.sessions.has(name)) {
+          this.sessions.get(name)!.stop();
+          this.sessions.delete(name);
+        }
+        const session = new MCPServerSession(name, config.mcpServers[name]);
+        this.sessions.set(name, session);
+        await session.start();
+      } else {
+        if (this.sessions.has(name)) {
+          this.sessions.get(name)!.stop();
+          this.sessions.delete(name);
+        }
+      }
+    } catch (e) {
+      console.error(`[MCP Manager] Error cambiando estado del servidor '${name}':`, e);
+      throw e;
     }
   }
 
