@@ -79,12 +79,13 @@ export class GeminiService {
 DIRECTIVAS PRINCIPALES:
 1. JERARQUÍA DE CONTEXTO:
    - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas específicas, tu máxima prioridad y enfoque de análisis debe centrarse en ese material.
-   - Autonomía y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonomía para invocar herramientas en segundo plano (leer notas con 'query_vault', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar información o responder exhaustivamente.
+   - Autonomía y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonomía para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar información o responder exhaustivamente.
 2. GOBERNANZA Y PERMISOS INTERACTIVOS:
    - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmación en el chat.
    - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
-3. ESTILO DE RESPUESTA:
-   - Responde siempre en formato Markdown limpio, estructurado y profesional.
+3. OBLIGACIÓN DE RESPUESTA FINAL COMPLETA:
+   - Tras explorar o ejecutar herramientas, DEBES SIEMPRE ofrecer una respuesta final redactada, analítica, estructurada y en profundidad en Markdown que responda directamente a la pregunta o necesidad del usuario.
+   - NUNCA des por terminada tu intervención sin redactar el análisis y la respuesta correspondiente.
 
 CONTEXTO BASE DE LA BÓVEDA (CLIENTES Y CONTACTOS):
 ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través de herramientas.'}`;
@@ -109,7 +110,7 @@ ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través d
         
       let fullAccumulatedText = '';
       let currentPayload: any = { message: payload };
-      let maxIterations = 8;
+      let maxIterations = 25;
 
       while (maxIterations > 0) {
         if (signal?.aborted) {
@@ -143,7 +144,7 @@ ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través d
           }
         }
 
-        // Si no hay herramientas que ejecutar, terminamos el turno
+        // Si no hay herramientas que ejecutar, terminamos el ciclo de herramientas
         if (pendingFunctionCalls.length === 0) {
           break;
         }
@@ -224,15 +225,32 @@ ${vaultBaseContext || 'Directorio de contactos y clientes disponible a través d
           });
         }
 
-        // Devolver las respuestas al modelo
+        // Devolver las respuestas al modelo para que continúe pensando o responda
         currentPayload = {
           message: functionResponses as any
         };
 
         maxIterations--;
       }
+
+      // Si tras agotar herramientas aún no ha emitido una respuesta textual al usuario, forzar la síntesis final
+      if (!fullAccumulatedText.trim()) {
+        const synthesisResponse = await chat.sendMessageStream({
+          message: 'Sintetiza ahora y proporciona la respuesta final completa, detallada y estructurada para el usuario basándote en la información recolectada de las herramientas.'
+        });
+        for await (const chunk of synthesisResponse) {
+          if (signal?.aborted) throw new Error('AbortError');
+          const chunkText = chunk.text || '';
+          if (chunkText) {
+            fullAccumulatedText += chunkText;
+            if (feedback?.onToken) {
+              feedback.onToken(chunkText);
+            }
+          }
+        }
+      }
       
-      return fullAccumulatedText || 'Completado con éxito.';
+      return fullAccumulatedText || 'No se pudo obtener una respuesta detallada del modelo.';
     } catch (error: any) {
       if (signal?.aborted || error.message === 'AbortError' || error.name === 'AbortError') {
         throw new Error('AbortError');

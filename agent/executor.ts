@@ -1,7 +1,7 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, existsSync } from 'node:fs';
-import { App } from 'obsidian';
+import { App, TFile } from 'obsidian';
 
 const execAsync = promisify(exec);
 
@@ -47,6 +47,14 @@ export class ToolExecutor {
         return {
           group: 'files',
           displayTitle: `Read ${noteName}.md`
+        };
+      }
+      case 'read_vault_note': {
+        const notePath = args.note_path || '';
+        const noteName = notePath.split(/[\\/]/).pop() || notePath;
+        return {
+          group: 'files',
+          displayTitle: `Read ${noteName}`
         };
       }
       case 'query_vault': {
@@ -143,29 +151,120 @@ export class ToolExecutor {
           return { textResult: `Contenido de la nota actual (${file.basename}):\n\n${content}`, meta };
         }
 
-        case 'query_vault': {
-          const { query } = args;
-          const files = this.app.vault.getMarkdownFiles();
-          const matches = files.filter(f => f.path.toLowerCase().includes(String(query).toLowerCase()));
-          meta.resultSummary = `${matches.length} nota(s)`;
-          if (matches.length === 0) {
-            return { textResult: `No se encontraron notas que contengan: ${query}`, meta };
+        case 'read_vault_note': {
+          const { note_path } = args;
+          if (!note_path) {
+            meta.resultSummary = 'Ruta no especificada';
+            return { textResult: 'Error: No se indicó ninguna ruta de nota.', meta };
           }
+          const cleanPath = String(note_path).replace(/^[\\/]/, '');
+          let vaultFile = this.app.vault.getAbstractFileByPath(cleanPath) || this.app.vault.getAbstractFileByPath(cleanPath + '.md');
+          
+          if (!vaultFile) {
+            const fileNameOnly = cleanPath.split(/[\\/]/).pop() || cleanPath;
+            const baseNameOnly = fileNameOnly.replace(/\.md$/i, '');
+            const allFiles = this.app.vault.getMarkdownFiles();
+            vaultFile = allFiles.find(f => 
+              f.name.toLowerCase() === fileNameOnly.toLowerCase() ||
+              f.basename.toLowerCase() === baseNameOnly.toLowerCase() ||
+              f.path.toLowerCase().endsWith(cleanPath.toLowerCase())
+            ) || null;
+          }
+
+          if (vaultFile && vaultFile instanceof TFile) {
+            const content = await this.app.vault.read(vaultFile);
+            meta.resultSummary = `${content.length} caracteres`;
+            return { textResult: `Contenido de la nota (${vaultFile.path}):\n\n${content}`, meta };
+          }
+
+          meta.resultSummary = 'Nota no encontrada';
+          return { textResult: `Error: No se encontró la nota '${note_path}' en la bóveda de Obsidian.`, meta };
+        }
+
+        case 'query_vault': {
+          const rawQuery = String(args.query || '').trim();
+          const query = rawQuery.toLowerCase();
+          const files = this.app.vault.getMarkdownFiles();
+          
+          // 1. Coincidencias por nombre de archivo o ruta
+          const pathMatches = files.filter(f => f.path.toLowerCase().includes(query) || f.basename.toLowerCase().includes(query));
+          if (pathMatches.length > 0) {
+            meta.resultSummary = `${pathMatches.length} nota(s)`;
+            return {
+              textResult: `Notas encontradas por nombre/ruta para '${rawQuery}':\n` + pathMatches.slice(0, 30).map(m => `- ${m.path}`).join('\n') + (pathMatches.length > 30 ? `\n... y ${pathMatches.length - 30} notas más.` : ''),
+              meta
+            };
+          }
+
+          // 2. Búsqueda de contenido si no hay coincidencias de nombre
+          const contentMatches: { path: string, snippet: string }[] = [];
+          for (const file of files) {
+            try {
+              const content = await this.app.vault.read(file);
+              const idx = content.toLowerCase().indexOf(query);
+              if (idx !== -1) {
+                const start = Math.max(0, idx - 60);
+                const end = Math.min(content.length, idx + query.length + 60);
+                const snippet = content.substring(start, end).replace(/[\r\n]+/g, ' ');
+                contentMatches.push({ path: file.path, snippet: `...${snippet}...` });
+                if (contentMatches.length >= 15) break;
+              }
+            } catch (e) {}
+          }
+
+          meta.resultSummary = `${contentMatches.length} nota(s)`;
+          if (contentMatches.length === 0) {
+            return { textResult: `No se encontraron notas en la bóveda que contengan '${rawQuery}'.`, meta };
+          }
+
           return {
-            textResult: `Notas encontradas relacionadas con '${query}':\n` + matches.map(m => `- ${m.path}`).join('\n'),
+            textResult: `Notas con contenido que coincide con '${rawQuery}':\n` + contentMatches.map(m => `- **${m.path}**: ${m.snippet}`).join('\n'),
             meta
           };
         }
 
         case 'read_local_file': {
           const { file_path } = args;
-          if (!file_path || !existsSync(file_path)) {
-            meta.resultSummary = 'Archivo no encontrado';
-            return { textResult: `Error: El archivo '${file_path}' no existe o no es accesible.`, meta };
+          if (!file_path) {
+            meta.resultSummary = 'Ruta vacía';
+            return { textResult: 'Error: No se especificó ninguna ruta de archivo.', meta };
           }
-          const content = readFileSync(file_path, 'utf-8');
-          meta.resultSummary = `${content.length} bytes`;
-          return { textResult: `Contenido de ${file_path}:\n\n${content}`, meta };
+
+          // 1. Comprobar ruta directa en el sistema de archivos
+          if (existsSync(file_path)) {
+            try {
+              const content = readFileSync(file_path, 'utf-8');
+              meta.resultSummary = `${content.length} bytes`;
+              return { textResult: `Contenido de ${file_path}:\n\n${content}`, meta };
+            } catch (err: any) {
+              meta.resultSummary = 'Error de lectura';
+              return { textResult: `Error leyendo archivo: ${err.message}`, meta };
+            }
+          }
+
+          // 2. Buscar en la bóveda de Obsidian por ruta relativa o nombre de archivo
+          const cleanPath = String(file_path).replace(/^[\\/]/, '');
+          let vaultFile = this.app.vault.getAbstractFileByPath(cleanPath) || this.app.vault.getAbstractFileByPath(cleanPath + '.md');
+          
+          if (!vaultFile) {
+            const fileNameOnly = cleanPath.split(/[\\/]/).pop() || cleanPath;
+            const baseNameOnly = fileNameOnly.replace(/\.md$/i, '');
+            const allFiles = this.app.vault.getMarkdownFiles();
+            vaultFile = allFiles.find(f => 
+              f.name.toLowerCase() === fileNameOnly.toLowerCase() ||
+              f.basename.toLowerCase() === baseNameOnly.toLowerCase() ||
+              f.path.toLowerCase().endsWith(cleanPath.toLowerCase())
+            ) || null;
+          }
+
+          if (vaultFile && vaultFile instanceof TFile) {
+            const content = await this.app.vault.read(vaultFile);
+            meta.resultSummary = `${content.length} caracteres`;
+            return { textResult: `Contenido de la nota (${vaultFile.path}):\n\n${content}`, meta };
+          }
+
+          meta.resultSummary = 'Archivo no encontrado';
+          return { textResult: `Error: El archivo '${file_path}' no existe en el sistema de archivos ni en la bóveda de Obsidian.`, meta };
         }
 
         case 'request_user_permission': {

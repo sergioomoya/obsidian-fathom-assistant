@@ -6,6 +6,17 @@ export const agentTools: FunctionDeclaration[] = [
     description: 'Lee el contenido de la nota que está abierta actualmente en Obsidian para que el agente sepa qué está leyendo el usuario.',
   },
   {
+    name: 'read_vault_note',
+    description: 'Lee el contenido completo de una nota dentro de la bóveda de Obsidian especificando su ruta o nombre (ej: "CLIENTE/Minutas/Reunion.md" o "minutas.md").',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        note_path: { type: Type.STRING, description: 'Ruta relativa o nombre de la nota en la bóveda de Obsidian' }
+      },
+      required: ['note_path']
+    }
+  },
+  {
     name: 'query_vault',
     description: 'Busca notas y archivos por nombre o contenido en la bóveda de Obsidian.',
     parameters: {

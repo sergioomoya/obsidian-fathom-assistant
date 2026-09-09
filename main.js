@@ -345,7 +345,7 @@ __export(main_exports, {
   default: () => FathomAssistantPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // node_modules/@google/genai/dist/web/index.mjs
 var import_p_retry = __toESM(require_p_retry(), 1);
@@ -22289,6 +22289,17 @@ var agentTools = [
     description: "Lee el contenido de la nota que est\xE1 abierta actualmente en Obsidian para que el agente sepa qu\xE9 est\xE1 leyendo el usuario."
   },
   {
+    name: "read_vault_note",
+    description: 'Lee el contenido completo de una nota dentro de la b\xF3veda de Obsidian especificando su ruta o nombre (ej: "CLIENTE/Minutas/Reunion.md" o "minutas.md").',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        note_path: { type: Type.STRING, description: "Ruta relativa o nombre de la nota en la b\xF3veda de Obsidian" }
+      },
+      required: ["note_path"]
+    }
+  },
+  {
     name: "query_vault",
     description: "Busca notas y archivos por nombre o contenido en la b\xF3veda de Obsidian.",
     parameters: {
@@ -22436,12 +22447,13 @@ var GeminiService = class {
 DIRECTIVAS PRINCIPALES:
 1. JERARQU\xCDA DE CONTEXTO:
    - Foco Prioritario: Si el usuario te proporciona o adjunta notas, documentos o carpetas espec\xEDficas, tu m\xE1xima prioridad y enfoque de an\xE1lisis debe centrarse en ese material.
-   - Autonom\xEDa y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonom\xEDa para invocar herramientas en segundo plano (leer notas con 'query_vault', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar informaci\xF3n o responder exhaustivamente.
+   - Autonom\xEDa y Acceso Global: El foco en un documento no te limita. Tienes plena libertad y autonom\xEDa para invocar herramientas en segundo plano (leer notas con 'query_vault' o 'read_vault_note', leer cualquier archivo en el equipo con 'read_local_file', consultar servidores MCP como NotebookLM o bases de datos SQL) siempre que necesites contrastar informaci\xF3n o responder exhaustivamente.
 2. GOBERNANZA Y PERMISOS INTERACTIVOS:
    - Antes de ejecutar acciones de impacto significativo (ej: modificar bases de datos SQL, sobreescribir archivos o alterar configuraciones), invoca la herramienta 'request_user_permission' para pedir confirmaci\xF3n en el chat.
    - Para flujos complejos de varios pasos, utiliza 'propose_implementation_plan' para presentar un checklist estructurado.
-3. ESTILO DE RESPUESTA:
-   - Responde siempre en formato Markdown limpio, estructurado y profesional.
+3. OBLIGACI\xD3N DE RESPUESTA FINAL COMPLETA:
+   - Tras explorar o ejecutar herramientas, DEBES SIEMPRE ofrecer una respuesta final redactada, anal\xEDtica, estructurada y en profundidad en Markdown que responda directamente a la pregunta o necesidad del usuario.
+   - NUNCA des por terminada tu intervenci\xF3n sin redactar el an\xE1lisis y la respuesta correspondiente.
 
 CONTEXTO BASE DE LA B\xD3VEDA (CLIENTES Y CONTACTOS):
 ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s de herramientas."}`;
@@ -22459,7 +22471,7 @@ ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s
       const payload = Array.isArray(promptParts) && promptParts.length === 1 && typeof promptParts[0] === "string" ? promptParts[0] : promptParts;
       let fullAccumulatedText = "";
       let currentPayload = { message: payload };
-      let maxIterations = 8;
+      let maxIterations = 25;
       while (maxIterations > 0) {
         if (signal == null ? void 0 : signal.aborted) {
           throw new Error("AbortError");
@@ -22557,7 +22569,23 @@ ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s
         };
         maxIterations--;
       }
-      return fullAccumulatedText || "Completado con \xE9xito.";
+      if (!fullAccumulatedText.trim()) {
+        const synthesisResponse = await chat.sendMessageStream({
+          message: "Sintetiza ahora y proporciona la respuesta final completa, detallada y estructurada para el usuario bas\xE1ndote en la informaci\xF3n recolectada de las herramientas."
+        });
+        for await (const chunk of synthesisResponse) {
+          if (signal == null ? void 0 : signal.aborted)
+            throw new Error("AbortError");
+          const chunkText = chunk.text || "";
+          if (chunkText) {
+            fullAccumulatedText += chunkText;
+            if (feedback == null ? void 0 : feedback.onToken) {
+              feedback.onToken(chunkText);
+            }
+          }
+        }
+      }
+      return fullAccumulatedText || "No se pudo obtener una respuesta detallada del modelo.";
     } catch (error) {
       if ((signal == null ? void 0 : signal.aborted) || error.message === "AbortError" || error.name === "AbortError") {
         throw new Error("AbortError");
@@ -22572,6 +22600,7 @@ ${vaultBaseContext || "Directorio de contactos y clientes disponible a trav\xE9s
 var import_node_child_process = require("node:child_process");
 var import_node_util = require("node:util");
 var import_node_fs = require("node:fs");
+var import_obsidian = require("obsidian");
 var execAsync = (0, import_node_util.promisify)(import_node_child_process.exec);
 var ToolExecutor = class {
   constructor(app, fathomRepoPath, handlers) {
@@ -22590,6 +22619,14 @@ var ToolExecutor = class {
         return {
           group: "files",
           displayTitle: `Read ${noteName}.md`
+        };
+      }
+      case "read_vault_note": {
+        const notePath = args.note_path || "";
+        const noteName = notePath.split(/[\\/]/).pop() || notePath;
+        return {
+          group: "files",
+          displayTitle: `Read ${noteName}`
         };
       }
       case "query_vault": {
@@ -22687,31 +22724,109 @@ var ToolExecutor = class {
 
 ${content}`, meta };
         }
+        case "read_vault_note": {
+          const { note_path } = args;
+          if (!note_path) {
+            meta.resultSummary = "Ruta no especificada";
+            return { textResult: "Error: No se indic\xF3 ninguna ruta de nota.", meta };
+          }
+          const cleanPath = String(note_path).replace(/^[\\/]/, "");
+          let vaultFile = this.app.vault.getAbstractFileByPath(cleanPath) || this.app.vault.getAbstractFileByPath(cleanPath + ".md");
+          if (!vaultFile) {
+            const fileNameOnly = cleanPath.split(/[\\/]/).pop() || cleanPath;
+            const baseNameOnly = fileNameOnly.replace(/\.md$/i, "");
+            const allFiles = this.app.vault.getMarkdownFiles();
+            vaultFile = allFiles.find(
+              (f) => f.name.toLowerCase() === fileNameOnly.toLowerCase() || f.basename.toLowerCase() === baseNameOnly.toLowerCase() || f.path.toLowerCase().endsWith(cleanPath.toLowerCase())
+            ) || null;
+          }
+          if (vaultFile && vaultFile instanceof import_obsidian.TFile) {
+            const content = await this.app.vault.read(vaultFile);
+            meta.resultSummary = `${content.length} caracteres`;
+            return { textResult: `Contenido de la nota (${vaultFile.path}):
+
+${content}`, meta };
+          }
+          meta.resultSummary = "Nota no encontrada";
+          return { textResult: `Error: No se encontr\xF3 la nota '${note_path}' en la b\xF3veda de Obsidian.`, meta };
+        }
         case "query_vault": {
-          const { query } = args;
+          const rawQuery = String(args.query || "").trim();
+          const query = rawQuery.toLowerCase();
           const files = this.app.vault.getMarkdownFiles();
-          const matches = files.filter((f) => f.path.toLowerCase().includes(String(query).toLowerCase()));
-          meta.resultSummary = `${matches.length} nota(s)`;
-          if (matches.length === 0) {
-            return { textResult: `No se encontraron notas que contengan: ${query}`, meta };
+          const pathMatches = files.filter((f) => f.path.toLowerCase().includes(query) || f.basename.toLowerCase().includes(query));
+          if (pathMatches.length > 0) {
+            meta.resultSummary = `${pathMatches.length} nota(s)`;
+            return {
+              textResult: `Notas encontradas por nombre/ruta para '${rawQuery}':
+` + pathMatches.slice(0, 30).map((m) => `- ${m.path}`).join("\n") + (pathMatches.length > 30 ? `
+... y ${pathMatches.length - 30} notas m\xE1s.` : ""),
+              meta
+            };
+          }
+          const contentMatches = [];
+          for (const file of files) {
+            try {
+              const content = await this.app.vault.read(file);
+              const idx = content.toLowerCase().indexOf(query);
+              if (idx !== -1) {
+                const start = Math.max(0, idx - 60);
+                const end = Math.min(content.length, idx + query.length + 60);
+                const snippet = content.substring(start, end).replace(/[\r\n]+/g, " ");
+                contentMatches.push({ path: file.path, snippet: `...${snippet}...` });
+                if (contentMatches.length >= 15)
+                  break;
+              }
+            } catch (e) {
+            }
+          }
+          meta.resultSummary = `${contentMatches.length} nota(s)`;
+          if (contentMatches.length === 0) {
+            return { textResult: `No se encontraron notas en la b\xF3veda que contengan '${rawQuery}'.`, meta };
           }
           return {
-            textResult: `Notas encontradas relacionadas con '${query}':
-` + matches.map((m) => `- ${m.path}`).join("\n"),
+            textResult: `Notas con contenido que coincide con '${rawQuery}':
+` + contentMatches.map((m) => `- **${m.path}**: ${m.snippet}`).join("\n"),
             meta
           };
         }
         case "read_local_file": {
           const { file_path } = args;
-          if (!file_path || !(0, import_node_fs.existsSync)(file_path)) {
-            meta.resultSummary = "Archivo no encontrado";
-            return { textResult: `Error: El archivo '${file_path}' no existe o no es accesible.`, meta };
+          if (!file_path) {
+            meta.resultSummary = "Ruta vac\xEDa";
+            return { textResult: "Error: No se especific\xF3 ninguna ruta de archivo.", meta };
           }
-          const content = (0, import_node_fs.readFileSync)(file_path, "utf-8");
-          meta.resultSummary = `${content.length} bytes`;
-          return { textResult: `Contenido de ${file_path}:
+          if ((0, import_node_fs.existsSync)(file_path)) {
+            try {
+              const content = (0, import_node_fs.readFileSync)(file_path, "utf-8");
+              meta.resultSummary = `${content.length} bytes`;
+              return { textResult: `Contenido de ${file_path}:
 
 ${content}`, meta };
+            } catch (err) {
+              meta.resultSummary = "Error de lectura";
+              return { textResult: `Error leyendo archivo: ${err.message}`, meta };
+            }
+          }
+          const cleanPath = String(file_path).replace(/^[\\/]/, "");
+          let vaultFile = this.app.vault.getAbstractFileByPath(cleanPath) || this.app.vault.getAbstractFileByPath(cleanPath + ".md");
+          if (!vaultFile) {
+            const fileNameOnly = cleanPath.split(/[\\/]/).pop() || cleanPath;
+            const baseNameOnly = fileNameOnly.replace(/\.md$/i, "");
+            const allFiles = this.app.vault.getMarkdownFiles();
+            vaultFile = allFiles.find(
+              (f) => f.name.toLowerCase() === fileNameOnly.toLowerCase() || f.basename.toLowerCase() === baseNameOnly.toLowerCase() || f.path.toLowerCase().endsWith(cleanPath.toLowerCase())
+            ) || null;
+          }
+          if (vaultFile && vaultFile instanceof import_obsidian.TFile) {
+            const content = await this.app.vault.read(vaultFile);
+            meta.resultSummary = `${content.length} caracteres`;
+            return { textResult: `Contenido de la nota (${vaultFile.path}):
+
+${content}`, meta };
+          }
+          meta.resultSummary = "Archivo no encontrado";
+          return { textResult: `Error: El archivo '${file_path}' no existe en el sistema de archivos ni en la b\xF3veda de Obsidian.`, meta };
         }
         case "request_user_permission": {
           const { action_title, action_details, danger_level = "medium" } = args;
@@ -23215,7 +23330,7 @@ var BotActivityTracker = class {
     }
   }
 };
-var FathomChatView = class extends import_obsidian.ItemView {
+var FathomChatView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.activeContextItems = [];
@@ -23254,7 +23369,7 @@ var FathomChatView = class extends import_obsidian.ItemView {
         this.startNewChat();
       } else {
         const file = this.app.vault.getAbstractFileByPath(path);
-        if (file instanceof import_obsidian.TFile)
+        if (file instanceof import_obsidian2.TFile)
           await this.loadChat(file);
       }
     };
@@ -23373,21 +23488,21 @@ var FathomChatView = class extends import_obsidian.ItemView {
         const model = this.plugin.settings.geminiModel;
         if (!apiKey) {
           activityTracker.finish();
-          import_obsidian.MarkdownRenderer.render(this.app, "Por favor, configura tu Gemini API Key en los ajustes del plugin.", contentDiv, "", new import_obsidian.Component());
+          import_obsidian2.MarkdownRenderer.render(this.app, "Por favor, configura tu Gemini API Key en los ajustes del plugin.", contentDiv, "", new import_obsidian2.Component());
           return;
         }
         let finalPrompt = text || "Analiza el/los archivos adjuntos.";
         if (this.activeContextItems.length > 0) {
           let contextStr = "=== CONTEXTO MANUAL ADJUNTO POR EL USUARIO (FOCO PRIORITARIO) ===\n\n";
           for (const item of this.activeContextItems) {
-            if (item instanceof import_obsidian.TFile && item.extension === "md") {
+            if (item instanceof import_obsidian2.TFile && item.extension === "md") {
               const content = await this.app.vault.read(item);
               contextStr += `--- NOTA ADJUNTA: ${item.path} ---
 ${content}
 --- FIN NOTA ---
 
 `;
-            } else if (item instanceof import_obsidian.TFolder) {
+            } else if (item instanceof import_obsidian2.TFolder) {
               const filesInFolder = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(item.path + "/"));
               for (const f of filesInFolder) {
                 const content = await this.app.vault.read(f);
@@ -23499,7 +23614,7 @@ ${finalPrompt}`;
           onToken: (token) => {
             accumulatedResponseText += token;
             contentDiv.empty();
-            import_obsidian.MarkdownRenderer.render(this.app, accumulatedResponseText, contentDiv, "", new import_obsidian.Component());
+            import_obsidian2.MarkdownRenderer.render(this.app, accumulatedResponseText, contentDiv, "", new import_obsidian2.Component());
             this.scrollToBottom();
           }
         };
@@ -23518,12 +23633,12 @@ ${finalPrompt}`;
         activityTracker.finish();
         if (this.abortGeneration) {
           contentDiv.empty();
-          import_obsidian.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian.Component());
+          import_obsidian2.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian2.Component());
           this.chatHistory.pop();
           return;
         }
         contentDiv.empty();
-        import_obsidian.MarkdownRenderer.render(this.app, response, contentDiv, "", new import_obsidian.Component());
+        import_obsidian2.MarkdownRenderer.render(this.app, response, contentDiv, "", new import_obsidian2.Component());
         this.injectCopyButton(botMsgDiv, response);
         this.chatHistory.push({ role: "model", text: response });
         await this.saveChat();
@@ -23535,11 +23650,11 @@ ${finalPrompt}`;
         console.error("FATHOM_DEBUG - RAW ERROR:", err);
         if (err.message === "AbortError" || this.abortGeneration) {
           contentDiv.empty();
-          import_obsidian.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian.Component());
+          import_obsidian2.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian2.Component());
           this.chatHistory.pop();
         } else {
           contentDiv.empty();
-          import_obsidian.MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`, contentDiv, "", new import_obsidian.Component());
+          import_obsidian2.MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`, contentDiv, "", new import_obsidian2.Component());
           this.chatHistory.pop();
         }
       } finally {
@@ -23583,7 +23698,7 @@ ${finalPrompt}`;
     }
     let baseStr = "";
     const contactsFile = this.app.vault.getAbstractFileByPath("contacts.md");
-    if (contactsFile instanceof import_obsidian.TFile) {
+    if (contactsFile instanceof import_obsidian2.TFile) {
       try {
         const content = await this.app.vault.read(contactsFile);
         baseStr += `--- DIRECTORIO GENERAL DE CONTACTOS (contacts.md) ---
@@ -23593,7 +23708,7 @@ ${content}
       } catch (e) {
       }
     }
-    const rootFolders = this.app.vault.getRoot().children.filter((f) => f instanceof import_obsidian.TFolder && !f.name.startsWith(".") && f.name !== "Fathom Chats");
+    const rootFolders = this.app.vault.getRoot().children.filter((f) => f instanceof import_obsidian2.TFolder && !f.name.startsWith(".") && f.name !== "Fathom Chats");
     if (rootFolders.length > 0) {
       baseStr += `--- CARPETAS DE CLIENTES EN LA B\xD3VEDA ---
 ${rootFolders.map((f) => `- ${f.name}`).join("\n")}
@@ -23642,7 +23757,7 @@ ${rootFolders.map((f) => `- ${f.name}`).join("\n")}
       return;
     try {
       const folder = await this.getChatsFolder();
-      const files = folder.children.filter((f) => f instanceof import_obsidian.TFile && f.extension === "md");
+      const files = folder.children.filter((f) => f instanceof import_obsidian2.TFile && f.extension === "md");
       files.sort((a, b) => b.stat.mtime - a.stat.mtime);
       this.chatSelectorEl.empty();
       this.chatSelectorEl.createEl("option", { value: "new", text: "-- Nuevo Chat --" });
@@ -23759,7 +23874,7 @@ ${msg.text}
     this.chipsContainerEl.empty();
     for (const item of this.activeContextItems) {
       const chip = this.chipsContainerEl.createDiv({ cls: "context-chip" });
-      const isFolder = item instanceof import_obsidian.TFolder;
+      const isFolder = item instanceof import_obsidian2.TFolder;
       chip.createSpan({ text: `${isFolder ? "\u{1F4C1}" : "\u{1F4C4}"} ${item.name}` });
       const close = chip.createSpan({ cls: "context-chip-close", text: "\xD7" });
       close.onclick = () => {
@@ -23787,7 +23902,7 @@ ${msg.text}
   appendBotMessage(text) {
     const msgDiv = this.chatBoxEl.createDiv({ cls: "chat-message chat-message-bot" });
     const contentDiv = msgDiv.createDiv({ cls: "chat-message-content" });
-    import_obsidian.MarkdownRenderer.render(this.app, text, contentDiv, "", new import_obsidian.Component());
+    import_obsidian2.MarkdownRenderer.render(this.app, text, contentDiv, "", new import_obsidian2.Component());
     if (text && !text.startsWith("Pensando...")) {
       this.injectCopyButton(msgDiv, text);
     }
@@ -23814,7 +23929,7 @@ ${msg.text}
     }, 30);
   }
 };
-var FathomAssistantPlugin = class extends import_obsidian.Plugin {
+var FathomAssistantPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     console.log("Cargando Fathom Assistant Plugin...");
     await this.loadSettings();
@@ -23840,7 +23955,7 @@ var FathomAssistantPlugin = class extends import_obsidian.Plugin {
     this.addSettingTab(new FathomAssistantSettingTab(this.app, this));
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (file instanceof import_obsidian.TFile && file.extension === "md" || file instanceof import_obsidian.TFolder) {
+        if (file instanceof import_obsidian2.TFile && file.extension === "md" || file instanceof import_obsidian2.TFolder) {
           menu.addItem((item) => {
             item.setTitle("A\xF1adir contexto a Fathom Assistant").setIcon("bot").onClick(() => {
               const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_FATHOM_CHAT);
@@ -23884,7 +23999,7 @@ var FathomAssistantPlugin = class extends import_obsidian.Plugin {
       workspace.revealLeaf(leaf);
   }
 };
-var FathomAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
+var FathomAssistantSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -23893,23 +24008,23 @@ var FathomAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Configuraci\xF3n de Fathom Assistant" });
-    new import_obsidian.Setting(containerEl).setName("Gemini API Key").setDesc("Clave de la API de Google Gemini").addText((text) => text.setPlaceholder("AIzaSy...").setValue(this.plugin.settings.geminiApiKey).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Gemini API Key").setDesc("Clave de la API de Google Gemini").addText((text) => text.setPlaceholder("AIzaSy...").setValue(this.plugin.settings.geminiApiKey).onChange(async (value) => {
       this.plugin.settings.geminiApiKey = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Modelo de Gemini por defecto").setDesc("Modelo a utilizar por el asistente").addDropdown((drop) => drop.addOption("gemini-3.7-flash", "Gemini 3.7 Flash").addOption("gemini-2.5-flash", "Gemini 2.5 Flash").addOption("gemini-2.5-pro", "Gemini 2.5 Pro").addOption("gemini-3.1-flash", "Gemini 3.1 Flash").addOption("gemini-3.1-pro", "Gemini 3.1 Pro").setValue(this.plugin.settings.geminiModel).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Modelo de Gemini por defecto").setDesc("Modelo a utilizar por el asistente").addDropdown((drop) => drop.addOption("gemini-3.7-flash", "Gemini 3.7 Flash").addOption("gemini-2.5-flash", "Gemini 2.5 Flash").addOption("gemini-2.5-pro", "Gemini 2.5 Pro").addOption("gemini-3.1-flash", "Gemini 3.1 Flash").addOption("gemini-3.1-pro", "Gemini 3.1 Pro").setValue(this.plugin.settings.geminiModel).onChange(async (value) => {
       this.plugin.settings.geminiModel = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Ruta del repositorio Fathom Notebook").setDesc("Ruta absoluta donde se encuentra el proyecto backend").addText((text) => text.setPlaceholder("C:\\Ruta\\A\\Fathom Notebook").setValue(this.plugin.settings.fathomRepoPath).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Ruta del repositorio Fathom Notebook").setDesc("Ruta absoluta donde se encuentra el proyecto backend").addText((text) => text.setPlaceholder("C:\\Ruta\\A\\Fathom Notebook").setValue(this.plugin.settings.fathomRepoPath).onChange(async (value) => {
       this.plugin.settings.fathomRepoPath = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Carpeta de Chats").setDesc("Nombre de la carpeta de la b\xF3veda donde se guardan los historiales").addText((text) => text.setPlaceholder("Fathom Chats").setValue(this.plugin.settings.chatsFolder).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Carpeta de Chats").setDesc("Nombre de la carpeta de la b\xF3veda donde se guardan los historiales").addText((text) => text.setPlaceholder("Fathom Chats").setValue(this.plugin.settings.chatsFolder).onChange(async (value) => {
       this.plugin.settings.chatsFolder = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Contexto de Clientes y Contactos por defecto").setDesc("Inyectar autom\xE1ticamente el directorio contacts.md y la lista de clientes en las instrucciones base.").addToggle((toggle) => {
+    new import_obsidian2.Setting(containerEl).setName("Contexto de Clientes y Contactos por defecto").setDesc("Inyectar autom\xE1ticamente el directorio contacts.md y la lista de clientes en las instrucciones base.").addToggle((toggle) => {
       var _a2;
       return toggle.setValue((_a2 = this.plugin.settings.autoInjectClientContext) != null ? _a2 : true).onChange(async (value) => {
         this.plugin.settings.autoInjectClientContext = value;
@@ -23929,13 +24044,13 @@ var FathomAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
         cls: "setting-item-description"
       });
       for (const permKey of allowed) {
-        new import_obsidian.Setting(containerEl).setName(permKey.replace(/^perm_/, "").replace(/_/g, " ")).addButton((btn) => btn.setButtonText("Revocar Permiso").setWarning().onClick(async () => {
+        new import_obsidian2.Setting(containerEl).setName(permKey.replace(/^perm_/, "").replace(/_/g, " ")).addButton((btn) => btn.setButtonText("Revocar Permiso").setWarning().onClick(async () => {
           this.plugin.settings.alwaysAllowedPermissions = this.plugin.settings.alwaysAllowedPermissions.filter((k) => k !== permKey);
           await this.plugin.saveSettings();
           this.display();
         }));
       }
-      new import_obsidian.Setting(containerEl).setName("Restablecer todos los permisos").setDesc("Elimina todas las autorizaciones permanentes guardadas.").addButton((btn) => btn.setButtonText("Olvidar Todos").onClick(async () => {
+      new import_obsidian2.Setting(containerEl).setName("Restablecer todos los permisos").setDesc("Elimina todas las autorizaciones permanentes guardadas.").addButton((btn) => btn.setButtonText("Olvidar Todos").onClick(async () => {
         this.plugin.settings.alwaysAllowedPermissions = [];
         await this.plugin.saveSettings();
         this.display();
