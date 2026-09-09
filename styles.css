@@ -432,3 +432,116 @@
   opacity: 1;
   color: var(--text-error);
 }
+
+/* ─── ANTIGRAVITY ACTIVITY FEEDBACK ─── */
+.fathom-activity-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  user-select: text;
+}
+
+.fathom-activity-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fathom-activity-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  transition: color 0.15s;
+}
+
+.fathom-activity-header:hover {
+  color: var(--text-normal);
+}
+
+.fathom-activity-header .fathom-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
+  color: var(--text-faint);
+}
+
+.fathom-activity-group.is-open .fathom-chevron {
+  transform: rotate(90deg);
+}
+
+.fathom-activity-items {
+  display: none;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 14px;
+  margin-top: 2px;
+}
+
+.fathom-activity-group.is-open .fathom-activity-items {
+  display: flex;
+}
+
+.fathom-activity-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 2px 0;
+  line-height: 1.4;
+}
+
+.fathom-item-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fathom-item-status {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.fathom-item-status.done {
+  color: var(--color-green);
+}
+
+.fathom-working-indicator {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-faint);
+  padding-left: 14px;
+  animation: fathomPulse 1.5s infinite ease-in-out;
+}
+
+@keyframes fathomPulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
+
+.fathom-streaming-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  background-color: var(--interactive-accent);
+  margin-left: 2px;
+  vertical-align: middle;
+  animation: fathomBlink 0.8s infinite;
+}
+
+@keyframes fathomBlink {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+

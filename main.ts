@@ -1,5 +1,5 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, TAbstractFile, TFile, TFolder, MarkdownRenderer, Component } from 'obsidian';
-import { GeminiService } from './agent/gemini-service';
+import { GeminiService, AgentActivityStep, AgentUIFeedback } from './agent/gemini-service';
 import { ToolExecutor } from './agent/executor';
 
 // ─── INTERFACES Y CONSTANTES ────────────────────────────────────────────────────────
@@ -25,6 +25,133 @@ interface ExtAttachment {
   mime: string;
 }
 
+/**
+ * Gestor visual de la actividad agéntica en tiempo real (estilo Antigravity).
+ */
+class BotActivityTracker {
+  private containerEl: HTMLElement;
+  private filesGroupEl: HTMLElement | null = null;
+  private commandsGroupEl: HTMLElement | null = null;
+  private workingIndicatorEl: HTMLElement | null = null;
+  
+  private filesSteps: AgentActivityStep[] = [];
+  private commandSteps: AgentActivityStep[] = [];
+
+  constructor(parentEl: HTMLElement) {
+    this.containerEl = parentEl.createDiv({ cls: 'fathom-activity-card' });
+  }
+
+  addStep(step: AgentActivityStep) {
+    if (step.group === 'files') {
+      this.filesSteps.push(step);
+      this.renderFilesGroup();
+    } else {
+      this.commandSteps.push(step);
+      this.renderCommandsGroup();
+    }
+    this.updateWorkingIndicator();
+  }
+
+  updateStep(stepId: string, update: Partial<AgentActivityStep>) {
+    let found = this.filesSteps.find(s => s.id === stepId);
+    if (found) {
+      Object.assign(found, update);
+      this.renderFilesGroup();
+    } else {
+      found = this.commandSteps.find(s => s.id === stepId);
+      if (found) {
+        Object.assign(found, update);
+        this.renderCommandsGroup();
+      }
+    }
+    this.updateWorkingIndicator();
+  }
+
+  private renderFilesGroup() {
+    if (!this.filesGroupEl) {
+      this.filesGroupEl = this.containerEl.createDiv({ cls: 'fathom-activity-group' });
+    }
+    this.filesGroupEl.empty();
+
+    const count = this.filesSteps.length;
+    const isRunning = this.filesSteps.some(s => s.status === 'running');
+    const headerTitle = `Explored ${count} file${count === 1 ? '' : 's'}`;
+
+    const header = this.filesGroupEl.createDiv({ cls: 'fathom-activity-header' });
+    header.createSpan({ text: headerTitle });
+    const chevron = header.createSpan({ cls: 'fathom-chevron' });
+    chevron.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+
+    const items = this.filesGroupEl.createDiv({ cls: 'fathom-activity-items' });
+    for (const step of this.filesSteps) {
+      const itemEl = items.createDiv({ cls: 'fathom-activity-item' });
+      itemEl.createSpan({ text: step.displayTitle, cls: 'fathom-item-title' });
+      if (step.resultSummary) {
+        itemEl.createSpan({ text: step.resultSummary, cls: 'fathom-item-status done' });
+      }
+    }
+
+    header.onclick = () => {
+      this.filesGroupEl?.classList.toggle('is-open');
+    };
+  }
+
+  private renderCommandsGroup() {
+    if (!this.commandsGroupEl) {
+      this.commandsGroupEl = this.containerEl.createDiv({ cls: 'fathom-activity-group is-open' });
+    }
+    this.commandsGroupEl.empty();
+
+    const count = this.commandSteps.length;
+    const isRunning = this.commandSteps.some(s => s.status === 'running');
+    const headerTitle = isRunning 
+      ? `Running ${count} command${count === 1 ? '' : 's'}` 
+      : `Ran ${count} command${count === 1 ? '' : 's'}`;
+
+    const header = this.commandsGroupEl.createDiv({ cls: 'fathom-activity-header' });
+    header.createSpan({ text: headerTitle });
+    const chevron = header.createSpan({ cls: 'fathom-chevron' });
+    chevron.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+
+    const items = this.commandsGroupEl.createDiv({ cls: 'fathom-activity-items' });
+    for (const step of this.commandSteps) {
+      const itemEl = items.createDiv({ cls: 'fathom-activity-item' });
+      itemEl.createSpan({ text: step.displayTitle, cls: 'fathom-item-title' });
+      const statusEl = itemEl.createSpan({ cls: `fathom-item-status ${step.status === 'done' ? 'done' : ''}` });
+      statusEl.textContent = step.status === 'done' ? '✓' : (step.resultSummary || '>');
+    }
+
+    header.onclick = () => {
+      this.commandsGroupEl?.classList.toggle('is-open');
+    };
+  }
+
+  private updateWorkingIndicator() {
+    const hasRunning = this.filesSteps.some(s => s.status === 'running') || this.commandSteps.some(s => s.status === 'running');
+    if (hasRunning) {
+      if (!this.workingIndicatorEl) {
+        this.workingIndicatorEl = this.containerEl.createDiv({ cls: 'fathom-working-indicator', text: 'Working...' });
+      }
+    } else {
+      if (this.workingIndicatorEl) {
+        this.workingIndicatorEl.remove();
+        this.workingIndicatorEl = null;
+      }
+    }
+  }
+
+  finish() {
+    if (this.workingIndicatorEl) {
+      this.workingIndicatorEl.remove();
+      this.workingIndicatorEl = null;
+    }
+    // Si no hubo ninguna actividad, eliminar el contenedor para no dejar espacio vacío
+    if (this.filesSteps.length === 0 && this.commandSteps.length === 0) {
+      this.containerEl.remove();
+    }
+  }
+}
+
 // ─── VISTA LATERAL (SIDEBAR VIEW) ───────────────────────────────────────────────────
 export class FathomChatView extends ItemView {
   private activeContextItems: TAbstractFile[] = [];
@@ -47,6 +174,7 @@ export class FathomChatView extends ItemView {
   private isGenerating: boolean = false;
   private abortGeneration: boolean = false;
   private currentAbortResolver: ((reason?: any) => void) | null = null;
+  private currentAbortController: AbortController | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: FathomAssistantPlugin) {
     super(leaf);
@@ -65,7 +193,7 @@ export class FathomChatView extends ItemView {
     const mainDiv = container.createDiv({ cls: 'fathom-chat-container' });
     
     // ----------------------------------------------------
-    // Cabecera (Header) V4/V5
+    // Cabecera (Header)
     // ----------------------------------------------------
     const header = mainDiv.createDiv({ cls: 'fathom-chat-header' });
     
@@ -108,7 +236,7 @@ export class FathomChatView extends ItemView {
     this.chatBoxEl = mainDiv.createDiv({ cls: 'fathom-chat-box' });
 
     // ----------------------------------------------------
-    // Wrapper del input V6 (UI Dinámica)
+    // Wrapper del input
     const inputWrapper = mainDiv.createDiv({ cls: 'fathom-chat-input-wrapper' });
     this.chipsContainerEl = inputWrapper.createDiv({ cls: 'context-chip-list' });
     
@@ -122,7 +250,7 @@ export class FathomChatView extends ItemView {
     this.sendBtnEl = inputContainer.createEl('button', { cls: 'fathom-send-btn' });
     this.sendBtnEl.style.display = 'none'; // Vacío por defecto
     
-    // --- CHAT FOOTER V7 ---
+    // --- CHAT FOOTER ---
     const chatFooter = mainDiv.createDiv({ cls: 'fathom-chat-footer' });
     
     // --- POPOVER MENU (anclado al footer) ---
@@ -161,7 +289,13 @@ export class FathomChatView extends ItemView {
 
     // --- SELECTOR DE MODELO EN FOOTER ---
     const modelSelect = chatFooter.createEl('select', { cls: 'fathom-model-selector' });
-    const models = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3.1-flash', 'gemini-3.1-pro', 'gemini-3.6-flash', 'gemini-3.6-pro'];
+    const models = [
+      'gemini-3.7-flash', 
+      'gemini-2.5-flash', 
+      'gemini-2.5-pro', 
+      'gemini-3.1-flash', 
+      'gemini-3.1-pro'
+    ];
     for (const m of models) {
       modelSelect.createEl('option', { value: m, text: m });
     }
@@ -172,7 +306,6 @@ export class FathomChatView extends ItemView {
     };
 
     // Lógica Input Events
-    
     this.inputEl.addEventListener('paste', async (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -188,13 +321,9 @@ export class FathomChatView extends ItemView {
       }
     });
     
-    // --- BOTON DE ENVIAR (Y STOP) ---
-    this.sendBtnEl = inputContainer.createEl('button', { cls: 'fathom-send-btn' });
-    this.sendBtnEl.style.display = 'none'; // Vacío por defecto
-    
     this.inputEl.addEventListener('input', () => this.updateSendBtnState());
 
-    // --- LOGICA DE ENVIO ---
+    // --- LOGICA DE ENVIO CON FEEDBACK EN VIVO ESTILO ANTIGRAVITY ---
     const submitPrompt = async () => {
       if (this.isGenerating) return;
 
@@ -207,6 +336,7 @@ export class FathomChatView extends ItemView {
 
       this.isGenerating = true;
       this.abortGeneration = false;
+      this.currentAbortController = new AbortController();
       this.updateSendBtnState();
 
       if (text) {
@@ -215,7 +345,13 @@ export class FathomChatView extends ItemView {
         this.appendUserMessage(`[Ha enviado ${this.activeAttachments.length} archivo/s adjunto/s]`);
       }
       
-      const loader = this.appendBotMessage('Pensando...');
+      // Crear contenedor del mensaje del bot
+      const botMsgDiv = this.chatBoxEl.createDiv({ cls: 'chat-message chat-message-bot' });
+      const activityTracker = new BotActivityTracker(botMsgDiv);
+      const contentDiv = botMsgDiv.createDiv({ cls: 'chat-message-content' });
+      this.scrollToBottom();
+
+      let accumulatedResponseText = '';
       
       try {
         const apiKey = this.plugin.settings.geminiApiKey;
@@ -223,7 +359,8 @@ export class FathomChatView extends ItemView {
         const model = this.plugin.settings.geminiModel;
 
         if (!apiKey) {
-          this.updateBotMessage(loader, 'Por favor, configura tu Gemini API Key en los ajustes.');
+          activityTracker.finish();
+          MarkdownRenderer.render(this.app, 'Por favor, configura tu Gemini API Key en los ajustes del plugin.', contentDiv, '', new Component());
           return;
         }
 
@@ -247,7 +384,7 @@ export class FathomChatView extends ItemView {
         }
 
         const promptParts: any[] = [];
-        promptParts.push(finalPrompt); // Pasar como string puro
+        promptParts.push(finalPrompt);
 
         for (const att of this.activeAttachments) {
           promptParts.push({
@@ -265,20 +402,53 @@ export class FathomChatView extends ItemView {
             this.currentAbortResolver = reject;
         });
 
-        // --- LLAMADA A LA API ---
+        const feedback: AgentUIFeedback = {
+          onStepStart: (step) => {
+            activityTracker.addStep(step);
+            this.scrollToBottom();
+          },
+          onStepUpdate: (stepId, update) => {
+            activityTracker.updateStep(stepId, update);
+            this.scrollToBottom();
+          },
+          onToken: (token) => {
+            accumulatedResponseText += token;
+            contentDiv.empty();
+            MarkdownRenderer.render(this.app, accumulatedResponseText, contentDiv, '', new Component());
+            this.scrollToBottom();
+          }
+        };
+
+        // --- LLAMADA AGÉNTICA CON STREAMING Y ACTIVIDAD ---
         const response = await Promise.race([
-            service.sendMessage(promptParts, executor, model, this.chatHistory.slice(0, -1)),
+            service.sendMessage(
+              promptParts, 
+              executor, 
+              model, 
+              this.chatHistory.slice(0, -1), 
+              feedback, 
+              this.currentAbortController.signal
+            ),
             abortPromise
         ]);
         
-        // --- VERIFICAR ABORTO ---
+        // Finalizar tracker
+        activityTracker.finish();
+
         if (this.abortGeneration) {
-           this.updateBotMessage(loader, '*[Generación detenida por el usuario]*');
-           this.chatHistory.pop(); // Removemos la pregunta huérfana para no corromper el historial futuro
+           contentDiv.empty();
+           MarkdownRenderer.render(this.app, '*[Generación detenida por el usuario]*', contentDiv, '', new Component());
+           this.chatHistory.pop();
            return;
         }
         
-        this.updateBotMessage(loader, response);
+        // Renderizar Markdown final limpio
+        contentDiv.empty();
+        MarkdownRenderer.render(this.app, response, contentDiv, '', new Component());
+        
+        // Inyectar botón de copiar Markdown
+        this.injectCopyButton(botMsgDiv, response);
+
         this.chatHistory.push({ role: 'model', text: response });
         await this.saveChat();
         
@@ -287,21 +457,25 @@ export class FathomChatView extends ItemView {
         this.renderContextChips();
 
       } catch (err: any) {
+        activityTracker.finish();
         console.error("FATHOM_DEBUG - RAW ERROR:", err);
-        console.error("FATHOM_DEBUG - ERROR STACK:", err.stack);
         if (err.message === 'AbortError' || this.abortGeneration) {
-           this.updateBotMessage(loader, '*[Generación detenida por el usuario]*');
+           contentDiv.empty();
+           MarkdownRenderer.render(this.app, '*[Generación detenida por el usuario]*', contentDiv, '', new Component());
            this.chatHistory.pop();
         } else {
-           this.updateBotMessage(loader, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`);
+           contentDiv.empty();
+           MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para más detalles.`, contentDiv, '', new Component());
            this.chatHistory.pop();
         }
       } finally {
         this.isGenerating = false;
+        this.currentAbortController = null;
         this.updateSendBtnState();
         this.inputEl.disabled = false;
         attachBtn.disabled = false;
         this.inputEl.focus();
+        this.scrollToBottom();
       }
     };
 
@@ -315,8 +489,11 @@ export class FathomChatView extends ItemView {
     this.sendBtnEl.onclick = () => {
       if (this.isGenerating) {
         this.abortGeneration = true;
+        if (this.currentAbortController) {
+          this.currentAbortController.abort();
+        }
         if (this.currentAbortResolver) {
-            this.currentAbortResolver(new Error('AbortError'));
+          this.currentAbortResolver(new Error('AbortError'));
         }
       } else {
         submitPrompt();
@@ -338,13 +515,18 @@ export class FathomChatView extends ItemView {
     
     if (this.isGenerating) {
       this.sendBtnEl.style.display = 'flex';
-      this.sendBtnEl.innerHTML = SVG_STOP;
       this.sendBtnEl.classList.add('stop-mode');
+      this.sendBtnEl.innerHTML = SVG_STOP;
+      this.sendBtnEl.title = 'Parar generación';
     } else {
-      if ((this.inputEl && this.inputEl.value.trim().length > 0) || this.activeAttachments.length > 0) {
+      this.sendBtnEl.classList.remove('stop-mode');
+      const hasText = this.inputEl && this.inputEl.value.trim().length > 0;
+      const hasAttachments = this.activeAttachments.length > 0;
+      
+      if (hasText || hasAttachments) {
         this.sendBtnEl.style.display = 'flex';
         this.sendBtnEl.innerHTML = SVG_ARROW;
-        this.sendBtnEl.classList.remove('stop-mode');
+        this.sendBtnEl.title = 'Enviar mensaje';
       } else {
         this.sendBtnEl.style.display = 'none';
       }
@@ -365,13 +547,14 @@ export class FathomChatView extends ItemView {
 
   private async refreshChatList() {
     if (!this.chatSelectorEl) return;
-    this.chatSelectorEl.empty();
-    this.chatSelectorEl.createEl('option', { value: 'new', text: '-- Nuevo Chat --' });
     
     try {
       const folder = await this.getChatsFolder();
       const files = folder.children.filter(f => f instanceof TFile && f.extension === 'md') as TFile[];
       files.sort((a, b) => b.stat.mtime - a.stat.mtime);
+      
+      this.chatSelectorEl.empty();
+      this.chatSelectorEl.createEl('option', { value: 'new', text: '-- Nuevo Chat --' });
       
       for (const f of files) {
         const opt = this.chatSelectorEl.createEl('option', { value: f.path, text: f.basename });
@@ -380,11 +563,11 @@ export class FathomChatView extends ItemView {
         }
       }
     } catch (e) {
-      console.error("Error refreshing chat list", e);
+      console.error("FATHOM_DEBUG - Error refrescando lista de chats:", e);
     }
   }
 
-  private startNewChat() {
+  public startNewChat() {
     this.currentChatFile = null;
     this.chatHistory = [];
     if(this.titleInputEl) this.titleInputEl.value = 'Nueva Conversación';
@@ -402,8 +585,9 @@ export class FathomChatView extends ItemView {
     this.chatHistory = [];
     
     const content = await this.app.vault.read(file);
-    const regex = /### (Usuario|Fathom)\n\n([\s\S]*?)(?=\n### (Usuario|Fathom)|$)/g;
+    const regex = /### (Usuario|Fathom)\n\n([\s\S]*?)(?=\n\n###|$)/g;
     let match;
+    
     while ((match = regex.exec(content)) !== null) {
       const role = match[1] === 'Usuario' ? 'user' : 'model';
       const text = match[2].trim();
@@ -434,8 +618,8 @@ export class FathomChatView extends ItemView {
       this.titleInputEl.value = title;
       
       let safeTitle = title;
-      let counter = 1;
       let path = `${folder.path}/${safeTitle}.md`;
+      let counter = 1;
       while (this.app.vault.getAbstractFileByPath(path)) {
         safeTitle = `${title} (${counter})`;
         path = `${folder.path}/${safeTitle}.md`;
@@ -462,51 +646,52 @@ export class FathomChatView extends ItemView {
   }
 
   // ----------------------------------------------------
-  // MANEJO DE ADJUNTOS
+  // GESTIÓN DE CONTEXTO Y ADJUNTOS
   // ----------------------------------------------------
-  private async handleFileAttachment(file: File) {
-    return new Promise<void>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result as string;
-        const base64 = result.split(',')[1];
-        let extName = file.name || 'archivo_pegado';
-        if (!file.name && file.type.includes('image')) extName = 'imagen_pegada.png';
-        this.activeAttachments.push({ name: extName, base64: base64, mime: file.type || 'application/octet-stream' });
-        this.renderContextChips();
-        resolve();
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
+  public addContextItem(file: TAbstractFile) {
+    if (!this.activeContextItems.some(item => item.path === file.path)) {
+      this.activeContextItems.push(file);
+      this.renderContextChips();
+      this.updateSendBtnState();
+    }
   }
 
-  public addContextItem(item: TAbstractFile) {
-    if (!this.activeContextItems.find(f => f.path === item.path)) {
-      this.activeContextItems.push(item);
+  public async handleFileAttachment(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = (reader.result as string).split(',')[1];
+      this.activeAttachments.push({
+        name: file.name,
+        base64,
+        mime: file.type || 'application/octet-stream'
+      });
       this.renderContextChips();
-      this.updateSendBtnState(); // UI
-    }
+      this.updateSendBtnState();
+    };
+    reader.readAsDataURL(file);
   }
 
   private renderContextChips() {
     this.chipsContainerEl.empty();
+
     for (const item of this.activeContextItems) {
       const chip = this.chipsContainerEl.createDiv({ cls: 'context-chip' });
-      const icon = item instanceof TFolder ? '📁' : '📄';
-      chip.createSpan({ text: `${icon} ${item.name}` });
-      const close = chip.createSpan({ text: '✕', cls: 'context-chip-close' });
+      const isFolder = item instanceof TFolder;
+      chip.createSpan({ text: `${isFolder ? '📁' : '📄'} ${item.name}` });
+      
+      const close = chip.createSpan({ cls: 'context-chip-close', text: '×' });
       close.onclick = () => {
-        this.activeContextItems = this.activeContextItems.filter(f => f.path !== item.path);
+        this.activeContextItems = this.activeContextItems.filter(i => i.path !== item.path);
         this.renderContextChips();
         this.updateSendBtnState();
       };
     }
+
     for (const att of this.activeAttachments) {
       const chip = this.chipsContainerEl.createDiv({ cls: 'context-chip' });
-      const icon = att.mime.includes('image') ? '🖼️' : '📎';
-      chip.createSpan({ text: `${icon} ${att.name}` });
-      const close = chip.createSpan({ text: '✕', cls: 'context-chip-close' });
+      chip.createSpan({ text: `📎 ${att.name}` });
+      
+      const close = chip.createSpan({ cls: 'context-chip-close', text: '×' });
       close.onclick = () => {
         this.activeAttachments = this.activeAttachments.filter(a => a !== att);
         this.renderContextChips();
@@ -523,39 +708,32 @@ export class FathomChatView extends ItemView {
 
   private appendBotMessage(text: string): HTMLElement {
     const msgDiv = this.chatBoxEl.createDiv({ cls: 'chat-message chat-message-bot' });
-    this.renderBotMessageWithCopy(msgDiv, text);
+    const contentDiv = msgDiv.createDiv({ cls: 'chat-message-content' });
+    MarkdownRenderer.render(this.app, text, contentDiv, '', new Component());
+    if (text && !text.startsWith('Pensando...')) {
+      this.injectCopyButton(msgDiv, text);
+    }
     this.scrollToBottom();
     return msgDiv;
   }
 
-  private updateBotMessage(element: HTMLElement, text: string) {
-    element.empty();
-    this.renderBotMessageWithCopy(element, text);
-    this.scrollToBottom();
-  }
-
-  private renderBotMessageWithCopy(element: HTMLElement, text: string) {
-    const contentDiv = element.createDiv({ cls: 'chat-message-content' });
-    MarkdownRenderer.render(this.app, text, contentDiv, '', new Component());
+  private injectCopyButton(container: HTMLElement, rawMarkdown: string) {
+    const copyBtn = container.createEl('button', { cls: 'fathom-copy-btn', title: 'Copiar Markdown' });
+    const SVG_COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    const SVG_TICK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
     
-    if (text !== 'Pensando...') {
-        const copyBtn = element.createEl('button', { cls: 'fathom-copy-btn', title: 'Copiar Markdown' });
-        const SVG_COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-        const SVG_TICK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-        
-        copyBtn.innerHTML = SVG_COPY;
-        copyBtn.onclick = async () => {
-            await navigator.clipboard.writeText(text);
-            copyBtn.innerHTML = SVG_TICK;
-            setTimeout(() => { if(copyBtn) copyBtn.innerHTML = SVG_COPY; }, 2000);
-        };
-    }
+    copyBtn.innerHTML = SVG_COPY;
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(rawMarkdown);
+      copyBtn.innerHTML = SVG_TICK;
+      setTimeout(() => { if(copyBtn) copyBtn.innerHTML = SVG_COPY; }, 2000);
+    };
   }
 
   private scrollToBottom() {
     setTimeout(() => {
       this.chatBoxEl.scrollTop = this.chatBoxEl.scrollHeight;
-    }, 50);
+    }, 30);
   }
 }
 
@@ -650,6 +828,7 @@ class FathomAssistantSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
     containerEl.createEl('h2', { text: 'Configuración de Fathom Assistant' });
 
     new Setting(containerEl)
@@ -659,28 +838,24 @@ class FathomAssistantSettingTab extends PluginSettingTab {
         .setPlaceholder('AIzaSy...')
         .setValue(this.plugin.settings.geminiApiKey)
         .onChange(async (value) => {
-          this.plugin.settings.geminiApiKey = value;
+          this.plugin.settings.geminiApiKey = value.trim();
           await this.plugin.saveSettings();
         }));
-        
+
     new Setting(containerEl)
-      .setName('Modelo de Gemini')
-      .setDesc('Selecciona el modelo que deseas usar (Flash es rápido, Pro razona mejor).')
-      .addDropdown(dropdown => dropdown
-        .addOption('gemini-3.7-flash', 'Gemini 3.7 Flash (Recomendado)')
-        .addOption('gemini-3.7-pro', 'Gemini 3.7 Pro')
-        .addOption('gemini-3.6-flash', 'Gemini 3.6 Flash')
-        .addOption('gemini-3.6-pro', 'Gemini 3.6 Pro')
-        .addOption('gemini-3.1-flash', 'Gemini 3.1 Flash')
-        .addOption('gemini-3.1-pro', 'Gemini 3.1 Pro')
+      .setName('Modelo de Gemini por defecto')
+      .setDesc('Modelo a utilizar por el asistente')
+      .addDropdown(drop => drop
+        .addOption('gemini-3.7-flash', 'Gemini 3.7 Flash')
         .addOption('gemini-2.5-flash', 'Gemini 2.5 Flash')
         .addOption('gemini-2.5-pro', 'Gemini 2.5 Pro')
-        .setValue(this.plugin.settings.geminiModel || 'gemini-3.7-flash')
+        .addOption('gemini-3.1-flash', 'Gemini 3.1 Flash')
+        .addOption('gemini-3.1-pro', 'Gemini 3.1 Pro')
+        .setValue(this.plugin.settings.geminiModel)
         .onChange(async (value) => {
           this.plugin.settings.geminiModel = value;
           await this.plugin.saveSettings();
-        })
-      );
+        }));
 
     new Setting(containerEl)
       .setName('Ruta del repositorio Fathom Notebook')
@@ -689,18 +864,18 @@ class FathomAssistantSettingTab extends PluginSettingTab {
         .setPlaceholder('C:\\Ruta\\A\\Fathom Notebook')
         .setValue(this.plugin.settings.fathomRepoPath)
         .onChange(async (value) => {
-          this.plugin.settings.fathomRepoPath = value;
+          this.plugin.settings.fathomRepoPath = value.trim();
           await this.plugin.saveSettings();
         }));
 
     new Setting(containerEl)
-      .setName('Carpeta de Historial de Chats')
-      .setDesc('Carpeta de la bóveda donde se guardarán las conversaciones')
+      .setName('Carpeta de Chats')
+      .setDesc('Nombre de la carpeta de la bóveda donde se guardan los historiales')
       .addText(text => text
         .setPlaceholder('Fathom Chats')
         .setValue(this.plugin.settings.chatsFolder)
         .onChange(async (value) => {
-          this.plugin.settings.chatsFolder = value;
+          this.plugin.settings.chatsFolder = value.trim();
           await this.plugin.saveSettings();
         }));
   }

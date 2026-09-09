@@ -22290,11 +22290,11 @@ var agentTools = [
   },
   {
     name: "query_vault",
-    description: "Busca un t\xE9rmino espec\xEDfico en todas las minutas y planes de acci\xF3n guardados en la b\xF3veda de Obsidian.",
+    description: "Busca notas y archivos por nombre o contenido en la b\xF3veda de Obsidian.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: { type: Type.STRING, description: "T\xE9rmino o frase a buscar" }
+        query: { type: Type.STRING, description: "T\xE9rmino o frase a buscar en las notas" }
       },
       required: ["query"]
     }
@@ -22326,6 +22326,27 @@ var agentTools = [
   {
     name: "trigger_fathom_sync",
     description: "Lanza el proceso de sincronizaci\xF3n de Fathom Notebook para descargar y procesar las \xFAltimas reuniones."
+  },
+  {
+    name: "reprocess_meetings",
+    description: "Reprocesa reuniones existentes en Fathom Notebook para regenerar sus minutas.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        args: { type: Type.STRING, description: "Par\xE1metros opcionales para el reprocesamiento (ej: --all, o un ID espec\xEDfico)" }
+      }
+    }
+  },
+  {
+    name: "run_fathom_cli",
+    description: "Ejecuta un comando CLI en el backend de Fathom Notebook.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        subcommand: { type: Type.STRING, description: "Subcomando y argumentos para el CLI (ej: sync, add-mapping dominio empresa)" }
+      },
+      required: ["subcommand"]
+    }
   }
 ];
 
@@ -22338,11 +22359,9 @@ var GeminiService = class {
     this.ai = new GoogleGenAI2({ apiKey });
   }
   /**
-   * Envía un mensaje al modelo, que puede contener texto o imágenes.
-   * Acepta un historial previo para mantener el contexto.
+   * Envía un mensaje al modelo con soporte de streaming en tiempo real y bucle agéntico interactivo.
    */
-  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = []) {
-    var _a2;
+  async sendMessage(promptParts, executor, modelName = "gemini-3.7-flash", history = [], feedback, signal) {
     try {
       let sanitizedHistory = [];
       for (const msg of history) {
@@ -22368,40 +22387,90 @@ var GeminiService = class {
       const createParams = {
         model: modelName,
         config: {
-          systemInstruction: "Eres Fathom Assistant, un asistente virtual experto. Responde siempre en formato markdown.",
+          systemInstruction: "Eres Fathom Assistant, un agente inteligente para Obsidian. Tienes herramientas para consultar notas de la b\xF3veda y ejecutar comandos en Fathom Notebook. Utiliza las herramientas siempre que sea necesario para dar respuestas precisas y actualizadas. Responde en formato markdown limpio y conciso.",
           tools: [{ functionDeclarations: agentTools }]
         }
       };
       if (sanitizedHistory.length > 0) {
         createParams.history = sanitizedHistory;
       }
-      console.log("FATHOM_DEBUG - SDK createParams.history:", JSON.stringify(createParams.history, null, 2));
       const chat = this.ai.chats.create(createParams);
-      console.log("FATHOM_DEBUG - SDK payload to sendMessage:", JSON.stringify(promptParts, null, 2));
-      const payload = promptParts.length === 1 && typeof promptParts[0] === "string" ? promptParts[0] : promptParts;
-      let response = await chat.sendMessage({ message: payload });
-      let maxIterations = 5;
-      while (response.functionCalls && response.functionCalls.length > 0 && maxIterations > 0) {
-        const functionCall = response.functionCalls[0];
-        if (!functionCall.name)
-          break;
-        console.log(`[Gemini] Llamando a herramienta: ${functionCall.name}`, functionCall.args);
-        const toolResult = await executor.execute(functionCall.name, functionCall.args);
-        console.log(`[Gemini] Resultado de herramienta:`, toolResult);
-        response = await chat.sendMessage({
-          message: [{
-            functionResponse: {
-              name: functionCall.name,
-              response: { result: toolResult }
+      const payload = Array.isArray(promptParts) && promptParts.length === 1 && typeof promptParts[0] === "string" ? promptParts[0] : promptParts;
+      let fullAccumulatedText = "";
+      let currentPayload = { message: payload };
+      let maxIterations = 6;
+      while (maxIterations > 0) {
+        if (signal == null ? void 0 : signal.aborted) {
+          throw new Error("AbortError");
+        }
+        const streamResponse = await chat.sendMessageStream(currentPayload);
+        const pendingFunctionCalls = [];
+        let iterationText = "";
+        for await (const chunk of streamResponse) {
+          if (signal == null ? void 0 : signal.aborted) {
+            throw new Error("AbortError");
+          }
+          if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+            for (const fc of chunk.functionCalls) {
+              if (fc.name)
+                pendingFunctionCalls.push(fc);
             }
-          }]
-        });
+          }
+          const chunkText = chunk.text || "";
+          if (chunkText) {
+            iterationText += chunkText;
+            fullAccumulatedText += chunkText;
+            if (feedback == null ? void 0 : feedback.onToken) {
+              feedback.onToken(chunkText);
+            }
+          }
+        }
+        if (pendingFunctionCalls.length === 0) {
+          break;
+        }
+        const functionResponses = [];
+        for (let i = 0; i < pendingFunctionCalls.length; i++) {
+          if (signal == null ? void 0 : signal.aborted) {
+            throw new Error("AbortError");
+          }
+          const call = pendingFunctionCalls[i];
+          const stepId = `step_${Date.now()}_${i}`;
+          const initialMeta = executor.getToolMeta(call.name, call.args || {});
+          if (feedback == null ? void 0 : feedback.onStepStart) {
+            feedback.onStepStart({
+              id: stepId,
+              group: initialMeta.group,
+              displayTitle: initialMeta.displayTitle,
+              commandSnippet: initialMeta.commandSnippet,
+              status: "running"
+            });
+          }
+          const execResult = await executor.execute(call.name, call.args || {}, signal);
+          if (feedback == null ? void 0 : feedback.onStepUpdate) {
+            feedback.onStepUpdate(stepId, {
+              status: "done",
+              resultSummary: execResult.meta.resultSummary
+            });
+          }
+          functionResponses.push({
+            functionResponse: {
+              name: call.name,
+              response: { result: execResult.textResult }
+            }
+          });
+        }
+        currentPayload = {
+          message: functionResponses
+        };
         maxIterations--;
       }
-      return (_a2 = response.text) != null ? _a2 : "Sin respuesta final.";
+      return fullAccumulatedText || "Completado con \xE9xito.";
     } catch (error) {
+      if ((signal == null ? void 0 : signal.aborted) || error.message === "AbortError" || error.name === "AbortError") {
+        throw new Error("AbortError");
+      }
       console.error("Error llamando a Gemini:", error);
-      return `Error interno del Asistente: ${error}`;
+      throw error;
     }
   }
 };
@@ -22416,65 +22485,167 @@ var ToolExecutor = class {
     this.fathomRepoPath = fathomRepoPath;
   }
   /**
-   * Ejecuta la herramienta solicitada y devuelve el resultado en texto.
+   * Obtiene los metadatos visuales de la herramienta ANTES de ejecutarla (para pintar la tarjeta en vivo).
    */
-  async execute(name, args) {
+  getToolMeta(name, args) {
+    switch (name) {
+      case "read_current_note": {
+        const file = this.app.workspace.getActiveFile();
+        const noteName = file ? file.basename : "nota actual";
+        return {
+          group: "files",
+          displayTitle: `Read ${noteName}.md`
+        };
+      }
+      case "query_vault": {
+        const query = args.query || "";
+        return {
+          group: "files",
+          displayTitle: `Search vault for "${query}"`
+        };
+      }
+      case "add_domain_mapping": {
+        const cmd = `npm run cli add-mapping "${args.domain}" "${args.company}"`;
+        return {
+          group: "commands",
+          displayTitle: `Ran ${cmd}`,
+          commandSnippet: cmd
+        };
+      }
+      case "inject_participants": {
+        const cmd = `npm run cli add-override "${args.recording_id}" "${args.participants}"`;
+        return {
+          group: "commands",
+          displayTitle: `Ran ${cmd}`,
+          commandSnippet: cmd
+        };
+      }
+      case "trigger_fathom_sync": {
+        const cmd = `npm run cli sync`;
+        return {
+          group: "commands",
+          displayTitle: `Ran ${cmd}`,
+          commandSnippet: cmd
+        };
+      }
+      case "reprocess_meetings": {
+        const cmd = `npm run cli reprocess ${args.args || ""}`.trim();
+        return {
+          group: "commands",
+          displayTitle: `Ran ${cmd}`,
+          commandSnippet: cmd
+        };
+      }
+      case "run_fathom_cli": {
+        const cmd = `npm run cli ${args.subcommand || ""}`.trim();
+        return {
+          group: "commands",
+          displayTitle: `Ran ${cmd}`,
+          commandSnippet: cmd
+        };
+      }
+      default: {
+        return {
+          group: "commands",
+          displayTitle: `Execute tool: ${name}`
+        };
+      }
+    }
+  }
+  /**
+   * Ejecuta la herramienta solicitada y devuelve el resultado en texto junto a sus metadatos.
+   */
+  async execute(name, args, signal) {
+    const meta = this.getToolMeta(name, args);
     try {
       switch (name) {
         case "read_current_note": {
           const file = this.app.workspace.getActiveFile();
-          if (!file)
-            return "No hay ninguna nota abierta actualmente.";
+          if (!file) {
+            meta.resultSummary = "No hay nota activa";
+            return { textResult: "No hay ninguna nota abierta actualmente.", meta };
+          }
           const content = await this.app.vault.read(file);
-          return `Contenido de la nota actual (${file.basename}):
+          meta.resultSummary = `${content.length} caracteres le\xEDdos`;
+          return { textResult: `Contenido de la nota actual (${file.basename}):
 
-${content}`;
+${content}`, meta };
         }
         case "query_vault": {
           const { query } = args;
           const files = this.app.vault.getMarkdownFiles();
-          const matches = files.filter((f) => f.name.toLowerCase().includes(String(query).toLowerCase()));
-          if (matches.length === 0)
-            return `No se encontraron notas que contengan: ${query}`;
-          return `Notas encontradas relacionadas con '${query}':
-` + matches.map((m) => `- ${m.path}`).join("\n");
+          const matches = files.filter((f) => f.path.toLowerCase().includes(String(query).toLowerCase()));
+          meta.resultSummary = `${matches.length} nota(s) encontrada(s)`;
+          if (matches.length === 0) {
+            return { textResult: `No se encontraron notas que contengan: ${query}`, meta };
+          }
+          return {
+            textResult: `Notas encontradas relacionadas con '${query}':
+` + matches.map((m) => `- ${m.path}`).join("\n"),
+            meta
+          };
         }
         case "add_domain_mapping": {
           const { domain, company } = args;
-          return await this.runCliCommand(`npm run cli add-mapping "${domain}" "${company}"`);
+          const output = await this.runCliCommand(`npm run cli add-mapping "${domain}" "${company}"`, signal);
+          meta.resultSummary = "Mapeo guardado";
+          return { textResult: output, meta };
         }
         case "inject_participants": {
           const { recording_id, participants } = args;
-          return await this.runCliCommand(`npm run cli add-override "${recording_id}" "${participants}"`);
+          const output = await this.runCliCommand(`npm run cli add-override "${recording_id}" "${participants}"`, signal);
+          meta.resultSummary = "Override aplicado";
+          return { textResult: output, meta };
         }
         case "trigger_fathom_sync": {
-          return await this.runCliCommand(`npm run cli sync`);
+          const output = await this.runCliCommand(`npm run cli sync`, signal);
+          meta.resultSummary = "Sincronizaci\xF3n completada";
+          return { textResult: output, meta };
         }
-        default:
-          return `Error: Herramienta desconocida (${name})`;
+        case "reprocess_meetings": {
+          const output = await this.runCliCommand(`npm run cli reprocess ${args.args || ""}`.trim(), signal);
+          meta.resultSummary = "Reprocesamiento finalizado";
+          return { textResult: output, meta };
+        }
+        case "run_fathom_cli": {
+          const output = await this.runCliCommand(`npm run cli ${args.subcommand || ""}`.trim(), signal);
+          meta.resultSummary = "Comando ejecutado";
+          return { textResult: output, meta };
+        }
+        default: {
+          meta.resultSummary = "Herramienta desconocida";
+          return { textResult: `Error: Herramienta desconocida (${name})`, meta };
+        }
       }
     } catch (error) {
-      return `Excepci\xF3n ejecutando herramienta ${name}: ${error.message}`;
+      meta.resultSummary = `Error: ${error.message}`;
+      return { textResult: `Excepci\xF3n ejecutando herramienta ${name}: ${error.message}`, meta };
     }
   }
   /**
    * Envía un comando a la terminal del sistema host, ejecutándolo en el directorio del backend.
    */
-  async runCliCommand(command) {
+  async runCliCommand(command, signal) {
     if (!this.fathomRepoPath) {
       return "Error fatal: La ruta del repositorio (FATHOM_REPO_PATH) no est\xE1 configurada en los ajustes del plugin de Obsidian.";
     }
     console.log(`[Fathom Assistant] Ejecutando: ${command} en ${this.fathomRepoPath}`);
     try {
-      const { stdout, stderr } = await execAsync(command, { cwd: this.fathomRepoPath });
+      const { stdout, stderr } = await execAsync(command, {
+        cwd: this.fathomRepoPath,
+        signal
+      });
       return stdout || stderr || "Comando ejecutado con \xE9xito sin salida por consola.";
     } catch (error) {
+      if ((signal == null ? void 0 : signal.aborted) || error.name === "AbortError") {
+        throw new Error("Comando cancelado por el usuario.");
+      }
       console.error(`[Fathom Assistant] Error CLI:`, error);
       return `Error del sistema al ejecutar el comando:
 ${error.message}
 Salida:
-${error.stdout}
-${error.stderr}`;
+${error.stdout || ""}
+${error.stderr || ""}`;
     }
   }
 };
@@ -22487,6 +22658,111 @@ var DEFAULT_SETTINGS = {
   chatsFolder: "Fathom Chats"
 };
 var VIEW_TYPE_FATHOM_CHAT = "fathom-chat-view";
+var BotActivityTracker = class {
+  constructor(parentEl) {
+    this.filesGroupEl = null;
+    this.commandsGroupEl = null;
+    this.workingIndicatorEl = null;
+    this.filesSteps = [];
+    this.commandSteps = [];
+    this.containerEl = parentEl.createDiv({ cls: "fathom-activity-card" });
+  }
+  addStep(step) {
+    if (step.group === "files") {
+      this.filesSteps.push(step);
+      this.renderFilesGroup();
+    } else {
+      this.commandSteps.push(step);
+      this.renderCommandsGroup();
+    }
+    this.updateWorkingIndicator();
+  }
+  updateStep(stepId, update) {
+    let found = this.filesSteps.find((s) => s.id === stepId);
+    if (found) {
+      Object.assign(found, update);
+      this.renderFilesGroup();
+    } else {
+      found = this.commandSteps.find((s) => s.id === stepId);
+      if (found) {
+        Object.assign(found, update);
+        this.renderCommandsGroup();
+      }
+    }
+    this.updateWorkingIndicator();
+  }
+  renderFilesGroup() {
+    if (!this.filesGroupEl) {
+      this.filesGroupEl = this.containerEl.createDiv({ cls: "fathom-activity-group" });
+    }
+    this.filesGroupEl.empty();
+    const count = this.filesSteps.length;
+    const isRunning = this.filesSteps.some((s) => s.status === "running");
+    const headerTitle = `Explored ${count} file${count === 1 ? "" : "s"}`;
+    const header = this.filesGroupEl.createDiv({ cls: "fathom-activity-header" });
+    header.createSpan({ text: headerTitle });
+    const chevron = header.createSpan({ cls: "fathom-chevron" });
+    chevron.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+    const items = this.filesGroupEl.createDiv({ cls: "fathom-activity-items" });
+    for (const step of this.filesSteps) {
+      const itemEl = items.createDiv({ cls: "fathom-activity-item" });
+      itemEl.createSpan({ text: step.displayTitle, cls: "fathom-item-title" });
+      if (step.resultSummary) {
+        itemEl.createSpan({ text: step.resultSummary, cls: "fathom-item-status done" });
+      }
+    }
+    header.onclick = () => {
+      var _a2;
+      (_a2 = this.filesGroupEl) == null ? void 0 : _a2.classList.toggle("is-open");
+    };
+  }
+  renderCommandsGroup() {
+    if (!this.commandsGroupEl) {
+      this.commandsGroupEl = this.containerEl.createDiv({ cls: "fathom-activity-group is-open" });
+    }
+    this.commandsGroupEl.empty();
+    const count = this.commandSteps.length;
+    const isRunning = this.commandSteps.some((s) => s.status === "running");
+    const headerTitle = isRunning ? `Running ${count} command${count === 1 ? "" : "s"}` : `Ran ${count} command${count === 1 ? "" : "s"}`;
+    const header = this.commandsGroupEl.createDiv({ cls: "fathom-activity-header" });
+    header.createSpan({ text: headerTitle });
+    const chevron = header.createSpan({ cls: "fathom-chevron" });
+    chevron.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+    const items = this.commandsGroupEl.createDiv({ cls: "fathom-activity-items" });
+    for (const step of this.commandSteps) {
+      const itemEl = items.createDiv({ cls: "fathom-activity-item" });
+      itemEl.createSpan({ text: step.displayTitle, cls: "fathom-item-title" });
+      const statusEl = itemEl.createSpan({ cls: `fathom-item-status ${step.status === "done" ? "done" : ""}` });
+      statusEl.textContent = step.status === "done" ? "\u2713" : step.resultSummary || ">";
+    }
+    header.onclick = () => {
+      var _a2;
+      (_a2 = this.commandsGroupEl) == null ? void 0 : _a2.classList.toggle("is-open");
+    };
+  }
+  updateWorkingIndicator() {
+    const hasRunning = this.filesSteps.some((s) => s.status === "running") || this.commandSteps.some((s) => s.status === "running");
+    if (hasRunning) {
+      if (!this.workingIndicatorEl) {
+        this.workingIndicatorEl = this.containerEl.createDiv({ cls: "fathom-working-indicator", text: "Working..." });
+      }
+    } else {
+      if (this.workingIndicatorEl) {
+        this.workingIndicatorEl.remove();
+        this.workingIndicatorEl = null;
+      }
+    }
+  }
+  finish() {
+    if (this.workingIndicatorEl) {
+      this.workingIndicatorEl.remove();
+      this.workingIndicatorEl = null;
+    }
+    if (this.filesSteps.length === 0 && this.commandSteps.length === 0) {
+      this.containerEl.remove();
+    }
+  }
+};
 var FathomChatView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -22498,6 +22774,7 @@ var FathomChatView = class extends import_obsidian.ItemView {
     this.isGenerating = false;
     this.abortGeneration = false;
     this.currentAbortResolver = null;
+    this.currentAbortController = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -22582,7 +22859,13 @@ var FathomChatView = class extends import_obsidian.ItemView {
       this.updateSendBtnState();
     };
     const modelSelect = chatFooter.createEl("select", { cls: "fathom-model-selector" });
-    const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.6-pro"];
+    const models = [
+      "gemini-3.7-flash",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-3.1-flash",
+      "gemini-3.1-pro"
+    ];
     for (const m of models) {
       modelSelect.createEl("option", { value: m, text: m });
     }
@@ -22607,8 +22890,6 @@ var FathomChatView = class extends import_obsidian.ItemView {
         }
       }
     });
-    this.sendBtnEl = inputContainer.createEl("button", { cls: "fathom-send-btn" });
-    this.sendBtnEl.style.display = "none";
     this.inputEl.addEventListener("input", () => this.updateSendBtnState());
     const submitPrompt = async () => {
       if (this.isGenerating)
@@ -22621,19 +22902,25 @@ var FathomChatView = class extends import_obsidian.ItemView {
       attachBtn.disabled = true;
       this.isGenerating = true;
       this.abortGeneration = false;
+      this.currentAbortController = new AbortController();
       this.updateSendBtnState();
       if (text) {
         this.appendUserMessage(text);
       } else {
         this.appendUserMessage(`[Ha enviado ${this.activeAttachments.length} archivo/s adjunto/s]`);
       }
-      const loader = this.appendBotMessage("Pensando...");
+      const botMsgDiv = this.chatBoxEl.createDiv({ cls: "chat-message chat-message-bot" });
+      const activityTracker = new BotActivityTracker(botMsgDiv);
+      const contentDiv = botMsgDiv.createDiv({ cls: "chat-message-content" });
+      this.scrollToBottom();
+      let accumulatedResponseText = "";
       try {
         const apiKey = this.plugin.settings.geminiApiKey;
         const repoPath = this.plugin.settings.fathomRepoPath;
         const model = this.plugin.settings.geminiModel;
         if (!apiKey) {
-          this.updateBotMessage(loader, "Por favor, configura tu Gemini API Key en los ajustes.");
+          activityTracker.finish();
+          import_obsidian.MarkdownRenderer.render(this.app, "Por favor, configura tu Gemini API Key en los ajustes del plugin.", contentDiv, "", new import_obsidian.Component());
           return;
         }
         let finalPrompt = text || "Analiza el/los archivos adjuntos.";
@@ -22677,37 +22964,68 @@ ${finalPrompt}`;
         const abortPromise = new Promise((_, reject) => {
           this.currentAbortResolver = reject;
         });
+        const feedback = {
+          onStepStart: (step) => {
+            activityTracker.addStep(step);
+            this.scrollToBottom();
+          },
+          onStepUpdate: (stepId, update) => {
+            activityTracker.updateStep(stepId, update);
+            this.scrollToBottom();
+          },
+          onToken: (token) => {
+            accumulatedResponseText += token;
+            contentDiv.empty();
+            import_obsidian.MarkdownRenderer.render(this.app, accumulatedResponseText, contentDiv, "", new import_obsidian.Component());
+            this.scrollToBottom();
+          }
+        };
         const response = await Promise.race([
-          service.sendMessage(promptParts, executor, model, this.chatHistory.slice(0, -1)),
+          service.sendMessage(
+            promptParts,
+            executor,
+            model,
+            this.chatHistory.slice(0, -1),
+            feedback,
+            this.currentAbortController.signal
+          ),
           abortPromise
         ]);
+        activityTracker.finish();
         if (this.abortGeneration) {
-          this.updateBotMessage(loader, "*[Generaci\xF3n detenida por el usuario]*");
+          contentDiv.empty();
+          import_obsidian.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian.Component());
           this.chatHistory.pop();
           return;
         }
-        this.updateBotMessage(loader, response);
+        contentDiv.empty();
+        import_obsidian.MarkdownRenderer.render(this.app, response, contentDiv, "", new import_obsidian.Component());
+        this.injectCopyButton(botMsgDiv, response);
         this.chatHistory.push({ role: "model", text: response });
         await this.saveChat();
         this.activeContextItems = [];
         this.activeAttachments = [];
         this.renderContextChips();
       } catch (err) {
+        activityTracker.finish();
         console.error("FATHOM_DEBUG - RAW ERROR:", err);
-        console.error("FATHOM_DEBUG - ERROR STACK:", err.stack);
         if (err.message === "AbortError" || this.abortGeneration) {
-          this.updateBotMessage(loader, "*[Generaci\xF3n detenida por el usuario]*");
+          contentDiv.empty();
+          import_obsidian.MarkdownRenderer.render(this.app, "*[Generaci\xF3n detenida por el usuario]*", contentDiv, "", new import_obsidian.Component());
           this.chatHistory.pop();
         } else {
-          this.updateBotMessage(loader, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para ver el log.`);
+          contentDiv.empty();
+          import_obsidian.MarkdownRenderer.render(this.app, `Hubo un error: ${err.message}. Abre las DevTools (Ctrl+Shift+I) para m\xE1s detalles.`, contentDiv, "", new import_obsidian.Component());
           this.chatHistory.pop();
         }
       } finally {
         this.isGenerating = false;
+        this.currentAbortController = null;
         this.updateSendBtnState();
         this.inputEl.disabled = false;
         attachBtn.disabled = false;
         this.inputEl.focus();
+        this.scrollToBottom();
       }
     };
     this.inputEl.addEventListener("keydown", (e) => {
@@ -22719,6 +23037,9 @@ ${finalPrompt}`;
     this.sendBtnEl.onclick = () => {
       if (this.isGenerating) {
         this.abortGeneration = true;
+        if (this.currentAbortController) {
+          this.currentAbortController.abort();
+        }
         if (this.currentAbortResolver) {
           this.currentAbortResolver(new Error("AbortError"));
         }
@@ -22739,13 +23060,17 @@ ${finalPrompt}`;
     const SVG_STOP = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2" ry="2"></rect></svg>';
     if (this.isGenerating) {
       this.sendBtnEl.style.display = "flex";
-      this.sendBtnEl.innerHTML = SVG_STOP;
       this.sendBtnEl.classList.add("stop-mode");
+      this.sendBtnEl.innerHTML = SVG_STOP;
+      this.sendBtnEl.title = "Parar generaci\xF3n";
     } else {
-      if (this.inputEl && this.inputEl.value.trim().length > 0 || this.activeAttachments.length > 0) {
+      this.sendBtnEl.classList.remove("stop-mode");
+      const hasText = this.inputEl && this.inputEl.value.trim().length > 0;
+      const hasAttachments = this.activeAttachments.length > 0;
+      if (hasText || hasAttachments) {
         this.sendBtnEl.style.display = "flex";
         this.sendBtnEl.innerHTML = SVG_ARROW;
-        this.sendBtnEl.classList.remove("stop-mode");
+        this.sendBtnEl.title = "Enviar mensaje";
       } else {
         this.sendBtnEl.style.display = "none";
       }
@@ -22765,12 +23090,12 @@ ${finalPrompt}`;
   async refreshChatList() {
     if (!this.chatSelectorEl)
       return;
-    this.chatSelectorEl.empty();
-    this.chatSelectorEl.createEl("option", { value: "new", text: "-- Nuevo Chat --" });
     try {
       const folder = await this.getChatsFolder();
       const files = folder.children.filter((f) => f instanceof import_obsidian.TFile && f.extension === "md");
       files.sort((a, b) => b.stat.mtime - a.stat.mtime);
+      this.chatSelectorEl.empty();
+      this.chatSelectorEl.createEl("option", { value: "new", text: "-- Nuevo Chat --" });
       for (const f of files) {
         const opt = this.chatSelectorEl.createEl("option", { value: f.path, text: f.basename });
         if (this.currentChatFile && this.currentChatFile.path === f.path) {
@@ -22778,7 +23103,7 @@ ${finalPrompt}`;
         }
       }
     } catch (e) {
-      console.error("Error refreshing chat list", e);
+      console.error("FATHOM_DEBUG - Error refrescando lista de chats:", e);
     }
   }
   startNewChat() {
@@ -22799,7 +23124,7 @@ ${finalPrompt}`;
     this.chatBoxEl.empty();
     this.chatHistory = [];
     const content = await this.app.vault.read(file);
-    const regex = /### (Usuario|Fathom)\n\n([\s\S]*?)(?=\n### (Usuario|Fathom)|$)/g;
+    const regex = /### (Usuario|Fathom)\n\n([\s\S]*?)(?=\n\n###|$)/g;
     let match2;
     while ((match2 = regex.exec(content)) !== null) {
       const role = match2[1] === "Usuario" ? "user" : "model";
@@ -22834,8 +23159,8 @@ ${msg.text}
       }
       this.titleInputEl.value = title;
       let safeTitle = title;
-      let counter = 1;
       let path = `${folder.path}/${safeTitle}.md`;
+      let counter = 1;
       while (this.app.vault.getAbstractFileByPath(path)) {
         safeTitle = `${title} (${counter})`;
         path = `${folder.path}/${safeTitle}.md`;
@@ -22860,50 +23185,46 @@ ${msg.text}
     }
   }
   // ----------------------------------------------------
-  // MANEJO DE ADJUNTOS
+  // GESTIÓN DE CONTEXTO Y ADJUNTOS
   // ----------------------------------------------------
-  async handleFileAttachment(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        const base64 = result.split(",")[1];
-        let extName = file.name || "archivo_pegado";
-        if (!file.name && file.type.includes("image"))
-          extName = "imagen_pegada.png";
-        this.activeAttachments.push({ name: extName, base64, mime: file.type || "application/octet-stream" });
-        this.renderContextChips();
-        resolve();
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
-  addContextItem(item) {
-    if (!this.activeContextItems.find((f) => f.path === item.path)) {
-      this.activeContextItems.push(item);
+  addContextItem(file) {
+    if (!this.activeContextItems.some((item) => item.path === file.path)) {
+      this.activeContextItems.push(file);
       this.renderContextChips();
       this.updateSendBtnState();
     }
+  }
+  async handleFileAttachment(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result.split(",")[1];
+      this.activeAttachments.push({
+        name: file.name,
+        base64,
+        mime: file.type || "application/octet-stream"
+      });
+      this.renderContextChips();
+      this.updateSendBtnState();
+    };
+    reader.readAsDataURL(file);
   }
   renderContextChips() {
     this.chipsContainerEl.empty();
     for (const item of this.activeContextItems) {
       const chip = this.chipsContainerEl.createDiv({ cls: "context-chip" });
-      const icon = item instanceof import_obsidian.TFolder ? "\u{1F4C1}" : "\u{1F4C4}";
-      chip.createSpan({ text: `${icon} ${item.name}` });
-      const close = chip.createSpan({ text: "\u2715", cls: "context-chip-close" });
+      const isFolder = item instanceof import_obsidian.TFolder;
+      chip.createSpan({ text: `${isFolder ? "\u{1F4C1}" : "\u{1F4C4}"} ${item.name}` });
+      const close = chip.createSpan({ cls: "context-chip-close", text: "\xD7" });
       close.onclick = () => {
-        this.activeContextItems = this.activeContextItems.filter((f) => f.path !== item.path);
+        this.activeContextItems = this.activeContextItems.filter((i) => i.path !== item.path);
         this.renderContextChips();
         this.updateSendBtnState();
       };
     }
     for (const att of this.activeAttachments) {
       const chip = this.chipsContainerEl.createDiv({ cls: "context-chip" });
-      const icon = att.mime.includes("image") ? "\u{1F5BC}\uFE0F" : "\u{1F4CE}";
-      chip.createSpan({ text: `${icon} ${att.name}` });
-      const close = chip.createSpan({ text: "\u2715", cls: "context-chip-close" });
+      chip.createSpan({ text: `\u{1F4CE} ${att.name}` });
+      const close = chip.createSpan({ cls: "context-chip-close", text: "\xD7" });
       close.onclick = () => {
         this.activeAttachments = this.activeAttachments.filter((a) => a !== att);
         this.renderContextChips();
@@ -22918,37 +23239,32 @@ ${msg.text}
   }
   appendBotMessage(text) {
     const msgDiv = this.chatBoxEl.createDiv({ cls: "chat-message chat-message-bot" });
-    this.renderBotMessageWithCopy(msgDiv, text);
+    const contentDiv = msgDiv.createDiv({ cls: "chat-message-content" });
+    import_obsidian.MarkdownRenderer.render(this.app, text, contentDiv, "", new import_obsidian.Component());
+    if (text && !text.startsWith("Pensando...")) {
+      this.injectCopyButton(msgDiv, text);
+    }
     this.scrollToBottom();
     return msgDiv;
   }
-  updateBotMessage(element, text) {
-    element.empty();
-    this.renderBotMessageWithCopy(element, text);
-    this.scrollToBottom();
-  }
-  renderBotMessageWithCopy(element, text) {
-    const contentDiv = element.createDiv({ cls: "chat-message-content" });
-    import_obsidian.MarkdownRenderer.render(this.app, text, contentDiv, "", new import_obsidian.Component());
-    if (text !== "Pensando...") {
-      const copyBtn = element.createEl("button", { cls: "fathom-copy-btn", title: "Copiar Markdown" });
-      const SVG_COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-      const SVG_TICK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-      copyBtn.innerHTML = SVG_COPY;
-      copyBtn.onclick = async () => {
-        await navigator.clipboard.writeText(text);
-        copyBtn.innerHTML = SVG_TICK;
-        setTimeout(() => {
-          if (copyBtn)
-            copyBtn.innerHTML = SVG_COPY;
-        }, 2e3);
-      };
-    }
+  injectCopyButton(container, rawMarkdown) {
+    const copyBtn = container.createEl("button", { cls: "fathom-copy-btn", title: "Copiar Markdown" });
+    const SVG_COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    const SVG_TICK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+    copyBtn.innerHTML = SVG_COPY;
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(rawMarkdown);
+      copyBtn.innerHTML = SVG_TICK;
+      setTimeout(() => {
+        if (copyBtn)
+          copyBtn.innerHTML = SVG_COPY;
+      }, 2e3);
+    };
   }
   scrollToBottom() {
     setTimeout(() => {
       this.chatBoxEl.scrollTop = this.chatBoxEl.scrollHeight;
-    }, 50);
+    }, 30);
   }
 };
 var FathomAssistantPlugin = class extends import_obsidian.Plugin {
@@ -23024,21 +23340,19 @@ var FathomAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Configuraci\xF3n de Fathom Assistant" });
     new import_obsidian.Setting(containerEl).setName("Gemini API Key").setDesc("Clave de la API de Google Gemini").addText((text) => text.setPlaceholder("AIzaSy...").setValue(this.plugin.settings.geminiApiKey).onChange(async (value) => {
-      this.plugin.settings.geminiApiKey = value;
+      this.plugin.settings.geminiApiKey = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Modelo de Gemini").setDesc("Selecciona el modelo que deseas usar (Flash es r\xE1pido, Pro razona mejor).").addDropdown(
-      (dropdown) => dropdown.addOption("gemini-3.7-flash", "Gemini 3.7 Flash (Recomendado)").addOption("gemini-3.7-pro", "Gemini 3.7 Pro").addOption("gemini-3.6-flash", "Gemini 3.6 Flash").addOption("gemini-3.6-pro", "Gemini 3.6 Pro").addOption("gemini-3.1-flash", "Gemini 3.1 Flash").addOption("gemini-3.1-pro", "Gemini 3.1 Pro").addOption("gemini-2.5-flash", "Gemini 2.5 Flash").addOption("gemini-2.5-pro", "Gemini 2.5 Pro").setValue(this.plugin.settings.geminiModel || "gemini-3.7-flash").onChange(async (value) => {
-        this.plugin.settings.geminiModel = value;
-        await this.plugin.saveSettings();
-      })
-    );
+    new import_obsidian.Setting(containerEl).setName("Modelo de Gemini por defecto").setDesc("Modelo a utilizar por el asistente").addDropdown((drop) => drop.addOption("gemini-3.7-flash", "Gemini 3.7 Flash").addOption("gemini-2.5-flash", "Gemini 2.5 Flash").addOption("gemini-2.5-pro", "Gemini 2.5 Pro").addOption("gemini-3.1-flash", "Gemini 3.1 Flash").addOption("gemini-3.1-pro", "Gemini 3.1 Pro").setValue(this.plugin.settings.geminiModel).onChange(async (value) => {
+      this.plugin.settings.geminiModel = value;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian.Setting(containerEl).setName("Ruta del repositorio Fathom Notebook").setDesc("Ruta absoluta donde se encuentra el proyecto backend").addText((text) => text.setPlaceholder("C:\\Ruta\\A\\Fathom Notebook").setValue(this.plugin.settings.fathomRepoPath).onChange(async (value) => {
-      this.plugin.settings.fathomRepoPath = value;
+      this.plugin.settings.fathomRepoPath = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Carpeta de Historial de Chats").setDesc("Carpeta de la b\xF3veda donde se guardar\xE1n las conversaciones").addText((text) => text.setPlaceholder("Fathom Chats").setValue(this.plugin.settings.chatsFolder).onChange(async (value) => {
-      this.plugin.settings.chatsFolder = value;
+    new import_obsidian.Setting(containerEl).setName("Carpeta de Chats").setDesc("Nombre de la carpeta de la b\xF3veda donde se guardan los historiales").addText((text) => text.setPlaceholder("Fathom Chats").setValue(this.plugin.settings.chatsFolder).onChange(async (value) => {
+      this.plugin.settings.chatsFolder = value.trim();
       await this.plugin.saveSettings();
     }));
   }

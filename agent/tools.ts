@@ -7,11 +7,11 @@ export const agentTools: FunctionDeclaration[] = [
   },
   {
     name: 'query_vault',
-    description: 'Busca un término específico en todas las minutas y planes de acción guardados en la bóveda de Obsidian.',
+    description: 'Busca notas y archivos por nombre o contenido en la bóveda de Obsidian.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: { type: Type.STRING, description: 'Término o frase a buscar' }
+        query: { type: Type.STRING, description: 'Término o frase a buscar en las notas' }
       },
       required: ['query']
     }
@@ -43,5 +43,26 @@ export const agentTools: FunctionDeclaration[] = [
   {
     name: 'trigger_fathom_sync',
     description: 'Lanza el proceso de sincronización de Fathom Notebook para descargar y procesar las últimas reuniones.',
+  },
+  {
+    name: 'reprocess_meetings',
+    description: 'Reprocesa reuniones existentes en Fathom Notebook para regenerar sus minutas.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        args: { type: Type.STRING, description: 'Parámetros opcionales para el reprocesamiento (ej: --all, o un ID específico)' }
+      }
+    }
+  },
+  {
+    name: 'run_fathom_cli',
+    description: 'Ejecuta un comando CLI en el backend de Fathom Notebook.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        subcommand: { type: Type.STRING, description: 'Subcomando y argumentos para el CLI (ej: sync, add-mapping dominio empresa)' }
+      },
+      required: ['subcommand']
+    }
   }
 ];
